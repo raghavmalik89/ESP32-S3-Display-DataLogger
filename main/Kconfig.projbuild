@@ -1,0 +1,10 @@
+menu "Sensor Logger"
+
+    config LOGGER_PROBE_MODE
+        bool "Build hardware probe app instead of the logger"
+        default n
+        help
+            Probe mode: I2C scan + WHO_AM_I identification, LCD smoke test,
+            buzzer sweep. Used for electrical discovery on the bench.
+
+endmenu
