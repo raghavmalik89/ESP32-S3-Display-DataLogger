@@ -17,6 +17,11 @@ esp_err_t lcd_init(void);
 esp_err_t lcd_fill(uint16_t rgb565);
 /* Draw a bitmap at (x,y), size w*h, pixels row-major RGB565. */
 esp_err_t lcd_blit(int x, int y, int w, int h, const uint16_t *pixels);
+/* 8x8 text helpers (font8x8_basic).  Text does not wrap — caller keeps
+ * strings within LCD_H_RES/8 columns.  Panel is write-only, so bg is
+ * always a solid color (no transparency). */
+esp_err_t lcd_char(int x, int y, char c, uint16_t fg, uint16_t bg);
+esp_err_t lcd_text(int x, int y, const char *s, uint16_t fg, uint16_t bg);
 void lcd_backlight(bool on);
 void lcd_release(void);   /* tear down (probe mode switches tables) */
 

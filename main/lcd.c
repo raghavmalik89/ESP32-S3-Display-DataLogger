@@ -10,6 +10,7 @@
  */
 #include "lcd.h"
 #include "config.h"
+#include "font8x8_basic.h"
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -93,14 +94,24 @@ static esp_err_t tx_cmd(uint8_t cmd, const uint8_t *data, uint8_t len)
 
 esp_err_t lcd_init(void)
 {
-    /* backlight off during init */
+    /* backlight OFF during init — GPIO14 is active LOW on this board:
+     * high = backlight off */
     gpio_config_t bl = {
         .pin_bit_mask = 1ULL << LCD_PIN_BL,
         .mode = GPIO_MODE_OUTPUT,
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&bl);
-    gpio_set_level(LCD_PIN_BL, 0);
+    gpio_set_level(LCD_PIN_BL, 1);
+
+    /* RST must be an output before we bit-bang it (was never configured,
+     * so the earlier "reset" silently did nothing) */
+    gpio_config_t rst = {
+        .pin_bit_mask = 1ULL << LCD_PIN_RST,
+        .mode = GPIO_MODE_OUTPUT,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&rst);
 
     spi_bus_config_t buscfg = {
         .mosi_io_num = LCD_PIN_MOSI,
@@ -180,8 +191,7 @@ esp_err_t lcd_blit(int x, int y, int w, int h, const uint16_t *pixels)
 esp_err_t lcd_fill(uint16_t rgb565)
 {
     static uint16_t line[LCD_H_RES];
-    uint16_t v = __builtin_bswap16(rgb565);
-    for (int i = 0; i < LCD_H_RES; i++) line[i] = v;
+    for (int i = 0; i < LCD_H_RES; i++) line[i] = rgb565;  /* blit swaps */
     for (int y = 0; y < LCD_V_RES; y++) {
         esp_err_t err = lcd_blit(0, y, LCD_H_RES, 1, line);
         if (err != ESP_OK) return err;
@@ -189,6 +199,29 @@ esp_err_t lcd_fill(uint16_t rgb565)
     return ESP_OK;
 }
 
-void lcd_backlight(bool on) { gpio_set_level(LCD_PIN_BL, on ? 1 : 0); }
+void lcd_backlight(bool on) { gpio_set_level(LCD_PIN_BL, on ? 0 : 1); }
+
+esp_err_t lcd_char(int x, int y, char c, uint16_t fg, uint16_t bg)
+{
+    uint16_t buf[8 * 8];
+    const uint8_t *g = font8x8_basic[(uint8_t)c & 0x7F];
+    for (int row = 0; row < 8; row++) {
+        for (int col = 0; col < 8; col++) {
+            bool on = (g[row] >> (7 - col)) & 1;
+            buf[row * 8 + col] = on ? fg : bg;
+        }
+    }
+    return lcd_blit(x, y, 8, 8, buf);
+}
+
+esp_err_t lcd_text(int x, int y, const char *s, uint16_t fg, uint16_t bg)
+{
+    esp_err_t err = ESP_OK;
+    while (*s && err == ESP_OK) {
+        err = lcd_char(x, y, *s++, fg, bg);
+        x += 8;
+    }
+    return err;
+}
 
 void lcd_release(void) { /* kept for probe experiments; not used in app */ }

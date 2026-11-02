@@ -152,8 +152,12 @@ void probe_main(void)
         lcd_fill(LCD_RED);    vTaskDelay(pdMS_TO_TICKS(700));
         lcd_fill(LCD_GREEN);  vTaskDelay(pdMS_TO_TICKS(700));
         lcd_fill(LCD_BLUE);   vTaskDelay(pdMS_TO_TICKS(700));
+        /* text label test: white on black, two lines */
         lcd_fill(LCD_BLACK);
-        ESP_LOGI(TAG, "LCD fill test done");
+        lcd_text(8, 40, "VARIO LOGGER", LCD_WHITE, LCD_BLACK);
+        lcd_text(8, 56, "PROBE V1", LCD_GREEN, LCD_BLACK);
+        lcd_text(8, 72, "0 1 2 3 4 5", LCD_YELLOW, LCD_BLACK);
+        ESP_LOGI(TAG, "LCD fill+text test done (label should be on screen)");
     } else {
         ESP_LOGE(TAG, "LCD init failed: %s", esp_err_to_name(err));
     }

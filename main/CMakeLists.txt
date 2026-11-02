@@ -3,6 +3,7 @@
 set(COMMON_SRCS
     "i2c_bus.c"
     "lcd.c"
+    "font8x8_basic.c"
     "qmi8658c.c"
     "bmp581.c"
     "lsm6dsv16x_reg.c"
