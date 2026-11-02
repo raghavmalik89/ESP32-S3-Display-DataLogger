@@ -1,12 +1,24 @@
-/* lcd.c — SPI panel bring-up for the Waveshare 1.9" 170x320 LCD.
+/* lcd.c — SPI panel for the Waveshare ESP32-S3-LCD-1.9 (ST7789V2-class,
+ * 170x320 native portrait glass).
  *
- * Landscape UI: 320 wide x 170 tall.  The 170-column native panel is centered
- * in a 240-wide GRAM with a 35 px offset; in landscape that offset lands on
- * the Y axis (per the official Waveshare ESP-IDF demo flush callback).
+ * Validated reference: Waveshare 08_FactoryProgram ships with
+ * `Direction Normal` = 170x320 PORTRAIT, NO MADCTL command sent, flush
+ * offset x+35.  Every MADCTL landscape variant (0x70/0x20/0x60/0xA0/0x30)
+ * produced mirrored output on this exact panel, so landscape is done in
+ * SOFTWARE: the panel stays in the factory configuration and a single,
+ * documented 90-degree transform maps the logical 320x170 landscape
+ * framebuffer to the native portrait GRAM at flush time.
  *
- * Panel type: the official ESP-IDF demo for this board drives the panel with
- * an SH8601-style init table; reseller docs say ST7789V2.  Both tables are
- * kept here; select with LCD_PANEL_TYPE.  Default: SH8601 table.
+ * Logical -> native transform (LCD_ROT_CW=1):
+ *      native_x = logical_y + 35            (offset on the short axis)
+ *      native_y = 319 - logical_x
+ * Flip LCD_ROT_CW to 0 for the opposite rotation direction.
+ *
+ * Rendering path: lcd_blit()/lcd_fill()/lcd_text() draw into a full-screen
+ * landscape shadow framebuffer and only mark a dirty rectangle; lcd_flush()
+ * rotates the dirty region into a DMA-capable bounce buffer and sends it
+ * through the esp_lcd SPI panel-IO.  The byte swap to panel-endian (RGB565
+ * high byte first) happens while filling the bounce buffer.
  */
 #include "lcd.h"
 #include "config.h"
@@ -15,6 +27,7 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_lcd_panel_commands.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -24,28 +37,37 @@
 
 static const char *TAG = "lcd";
 
-#define LCD_PANEL_SH8601 0
-#define LCD_PANEL_ST7789 1
-#define LCD_PANEL_TYPE LCD_PANEL_SH8601
-
 esp_lcd_panel_handle_t g_lcd_panel;
 esp_lcd_panel_io_handle_t g_lcd_io;
 
+#define LCD_NATIVE_W    170
+#define LCD_NATIVE_H    320
+#define LCD_NATIVE_XOFF 35
+
+#ifndef LCD_ROT_CW
+#define LCD_ROT_CW 1
+#endif
+
+/* flush slice width (logical px); bounds the bounce buffer size */
+#define FLUSH_SLICE_W 24
+/* max dirty height is LCD_V_RES (170); bounce = W*H uint16 in DMA RAM */
+static uint16_t s_bounce[FLUSH_SLICE_W * LCD_V_RES];
+
+/* landscape shadow framebuffer (PSRAM preferred) */
+static uint16_t *s_shadow;
+
+/* dirty rectangle in logical coords, inclusive */
+static int s_dx0, s_dy0, s_dx1, s_dy1;
+static bool s_dirty;
+
 typedef struct { uint8_t cmd; uint8_t data[16]; uint8_t len; uint8_t delay_ms; } lcd_cmd_t;
 
-/* SH8601-style table (Waveshare ESP-IDF 07_LVGL_Test / 08_FactoryProgram),
- * landscape MADCTL, Y gap 35.  COLMOD 0x3A=0x55 (RGB565) is REQUIRED:
- * the esp_lcd_sh8601 driver sends it before the vendor table (its
- * panel_init does MADCTL, COLMOD, then table); after hardware reset the
- * part is not in 16-bit mode, and without this every pixel stream is
- * misinterpreted (short fills, commands eaten as data). */
-static const lcd_cmd_t s_init_sh8601[] = {
-    {0x36, {0x20}, 1, 0},                                  /* MADCTL: MV only
-        * (landscape, no mirrors).  Waveshare's Rotate demo uses 0x70
-        * (MX|MV|ML) which mirrors the landscape image on both axes —
-        * bench photo confirmed: text mirrored, line order flipped.  With
-        * MV=1, MX flips the logical Y and MY/ML flip logical X, so the
-        * un-mirrored landscape needs MV alone. */
+/* Init table = Waveshare factory table (08_FactoryProgram, Direction
+ * Normal) with COLMOD 0x3A=0x55 re-inserted right after reset — the
+ * esp_lcd_sh8601 driver that Waveshare pairs with this table always sends
+ * COLMOD before the vendor commands; without it the part is not in
+ * 16-bit mode after HW reset.  No MADCTL: factory-validated default. */
+static const lcd_cmd_t s_init[] = {
     {0x3A, {0x55}, 1, 0},                                  /* COLMOD RGB565 */
     {0xB2, {0x0c, 0x0c, 0x00, 0x33, 0x33}, 5, 0},
     {0xB7, {0x35}, 1, 0},
@@ -66,48 +88,28 @@ static const lcd_cmd_t s_init_sh8601[] = {
     {0x29, {0}, 0, 0},                                     /* display on */
 };
 
-/* Classic ST7789V table; landscape MADCTL 0x60 (MV|MX), X gap 35 in
- * portrait terms -> kept here as fallback if the SH8601 table misbehaves. */
-static const lcd_cmd_t s_init_st7789[] = {
-    {0x36, {0x60}, 1, 0},
-    {0x3A, {0x55}, 1, 0},                                  /* RGB565 */
-    {0xB2, {0x0c, 0x0c, 0x00, 0x33, 0x33}, 5, 0},
-    {0xB7, {0x35}, 1, 0},
-    {0xBB, {0x13}, 1, 0},
-    {0xC0, {0x2c}, 1, 0},
-    {0xC2, {0x01}, 1, 0},
-    {0xC3, {0x0b}, 1, 0},
-    {0xC4, {0x20}, 1, 0},
-    {0xC6, {0x0f}, 1, 0},
-    {0xD0, {0xa4, 0xa1}, 2, 0},
-    {0xE0, {0x00, 0x03, 0x07, 0x08, 0x07, 0x15, 0x2A, 0x44,
-            0x42, 0x0A, 0x17, 0x18, 0x25, 0x27}, 14, 0},
-    {0xE1, {0x00, 0x03, 0x08, 0x07, 0x07, 0x23, 0x2A, 0x43,
-            0x42, 0x09, 0x18, 0x17, 0x25, 0x27}, 14, 0},
-    {0x21, {0}, 0, 0},
-    {0x11, {0}, 0, 120},
-    {0x29, {0}, 0, 0},
-};
-
-#if LCD_PANEL_TYPE == LCD_PANEL_SH8601
-#define GAP_X 0
-#define GAP_Y 35
-#else
-#define GAP_X 35
-#define GAP_Y 0
-#endif
-
 static esp_err_t tx_cmd(uint8_t cmd, const uint8_t *data, uint8_t len)
 {
     return esp_lcd_panel_io_tx_param(g_lcd_io, cmd, data, len);
 }
 
-esp_err_t lcd_set_madctl(uint8_t madctl) { return tx_cmd(0x36, &madctl, 1); }
+static void dirty_mark(int x, int y, int w, int h)
+{
+    if (w <= 0 || h <= 0) return;
+    if (!s_dirty) {
+        s_dx0 = x; s_dy0 = y; s_dx1 = x + w - 1; s_dy1 = y + h - 1;
+        s_dirty = true;
+    } else {
+        if (x < s_dx0) s_dx0 = x;
+        if (y < s_dy0) s_dy0 = y;
+        if (x + w - 1 > s_dx1) s_dx1 = x + w - 1;
+        if (y + h - 1 > s_dy1) s_dy1 = y + h - 1;
+    }
+}
 
 esp_err_t lcd_init(void)
 {
-    /* backlight OFF during init — GPIO14 is active LOW on this board:
-     * high = backlight off */
+    /* backlight OFF during init — GPIO14 is active LOW on this board */
     gpio_config_t bl = {
         .pin_bit_mask = 1ULL << LCD_PIN_BL,
         .mode = GPIO_MODE_OUTPUT,
@@ -116,8 +118,6 @@ esp_err_t lcd_init(void)
     gpio_config(&bl);
     gpio_set_level(LCD_PIN_BL, 1);
 
-    /* RST must be an output before we bit-bang it (was never configured,
-     * so the earlier "reset" silently did nothing) */
     gpio_config_t rst = {
         .pin_bit_mask = 1ULL << LCD_PIN_RST,
         .mode = GPIO_MODE_OUTPUT,
@@ -125,13 +125,24 @@ esp_err_t lcd_init(void)
     };
     gpio_config(&rst);
 
+    s_shadow = heap_caps_malloc(LCD_H_RES * LCD_V_RES * sizeof(uint16_t),
+                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_shadow)
+        s_shadow = heap_caps_malloc(LCD_H_RES * LCD_V_RES * sizeof(uint16_t),
+                                    MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    if (!s_shadow) {
+        ESP_LOGE(TAG, "shadow framebuffer alloc failed");
+        return ESP_ERR_NO_MEM;
+    }
+    memset(s_shadow, 0, LCD_H_RES * LCD_V_RES * sizeof(uint16_t));
+
     spi_bus_config_t buscfg = {
         .mosi_io_num = LCD_PIN_MOSI,
         .sclk_io_num = LCD_PIN_CLK,
         .miso_io_num = -1,            /* panel is write-only */
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_H_RES * LCD_V_RES * 2,
+        .max_transfer_sz = sizeof(s_bounce),
     };
     esp_err_t err = spi_bus_initialize(LCD_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
     if (err != ESP_OK) return err;
@@ -139,7 +150,7 @@ esp_err_t lcd_init(void)
     esp_lcd_panel_io_spi_config_t io_cfg = {
         .dc_gpio_num = LCD_PIN_DC,
         .cs_gpio_num = LCD_PIN_CS,
-        .pclk_hz = 20 * 1000 * 1000,
+        .pclk_hz = 40 * 1000 * 1000,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
         .spi_mode = 0,
@@ -155,60 +166,88 @@ esp_err_t lcd_init(void)
     gpio_set_level(LCD_PIN_RST, 1);
     vTaskDelay(pdMS_TO_TICKS(120));
 
-    const lcd_cmd_t *tbl = (LCD_PANEL_TYPE == LCD_PANEL_SH8601)
-                               ? s_init_sh8601 : s_init_st7789;
-    size_t n = (LCD_PANEL_TYPE == LCD_PANEL_SH8601)
-                   ? (sizeof(s_init_sh8601) / sizeof(lcd_cmd_t))
-                   : (sizeof(s_init_st7789) / sizeof(lcd_cmd_t));
-    for (size_t i = 0; i < n; i++) {
-        err = tx_cmd(tbl[i].cmd, tbl[i].len ? tbl[i].data : NULL, tbl[i].len);
+    for (size_t i = 0; i < sizeof(s_init) / sizeof(lcd_cmd_t); i++) {
+        err = tx_cmd(s_init[i].cmd, s_init[i].len ? s_init[i].data : NULL,
+                     s_init[i].len);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "init cmd 0x%02x failed: %s", tbl[i].cmd,
+            ESP_LOGE(TAG, "init cmd 0x%02x failed: %s", s_init[i].cmd,
                      esp_err_to_name(err));
             return err;
         }
-        if (tbl[i].delay_ms) vTaskDelay(pdMS_TO_TICKS(tbl[i].delay_ms));
+        if (s_init[i].delay_ms) vTaskDelay(pdMS_TO_TICKS(s_init[i].delay_ms));
     }
 
-    ESP_LOGW(TAG, "panel table=%s",
-             LCD_PANEL_TYPE == LCD_PANEL_SH8601 ? "SH8601" : "ST7789");
+    ESP_LOGI(TAG, "panel init done (portrait native, %s software rotation)",
+             LCD_ROT_CW ? "CW" : "CCW");
     lcd_backlight(true);
     return ESP_OK;
 }
 
-/* SPI transmits memory order, MSB first; the panel wants RGB565 high byte
- * first, so every pixel passes through a byte swap on this little-endian
- * MCU.  lcd_blit bounces through a scratch buffer. */
 esp_err_t lcd_blit(int x, int y, int w, int h, const uint16_t *pixels)
 {
-    size_t n = (size_t)w * h;
-    uint16_t *swap = malloc(n * 2);
-    if (!swap) return ESP_ERR_NO_MEM;
-    for (size_t i = 0; i < n; i++) swap[i] = __builtin_bswap16(pixels[i]);
+    if (x < 0 || y < 0 || x + w > LCD_H_RES || y + h > LCD_V_RES)
+        return ESP_ERR_INVALID_ARG;
+    for (int r = 0; r < h; r++)
+        memcpy(&s_shadow[(y + r) * LCD_H_RES + x], &pixels[r * w],
+               (size_t)w * sizeof(uint16_t));
+    dirty_mark(x, y, w, h);
+    return ESP_OK;
+}
 
-    uint8_t col[4] = { (uint8_t)((x + GAP_X) >> 8), (uint8_t)(x + GAP_X),
-                       (uint8_t)((x + w - 1 + GAP_X) >> 8),
-                       (uint8_t)(x + w - 1 + GAP_X) };
-    uint8_t row[4] = { (uint8_t)((y + GAP_Y) >> 8), (uint8_t)(y + GAP_Y),
-                       (uint8_t)((y + h - 1 + GAP_Y) >> 8),
-                       (uint8_t)(y + h - 1 + GAP_Y) };
-    esp_err_t err = tx_cmd(0x2A, col, 4);
-    if (err == ESP_OK) err = tx_cmd(0x2B, row, 4);
-    if (err == ESP_OK)
-        err = esp_lcd_panel_io_tx_color(g_lcd_io, 0x2C, swap, n * 2);
-    free(swap);
-    return err;
+esp_err_t lcd_flush(void)
+{
+    if (!s_dirty) return ESP_OK;
+    int x0 = s_dx0, y0 = s_dy0, x1 = s_dx1, y1 = s_dy1;
+    s_dirty = false;
+
+    int H = y1 - y0 + 1;
+    for (int sx0 = x0; sx0 <= x1; sx0 += FLUSH_SLICE_W) {
+        int sx1 = sx0 + FLUSH_SLICE_W - 1;
+        if (sx1 > x1) sx1 = x1;
+        int W = sx1 - sx0 + 1;
+
+        /* rotate slice into bounce, byte-swapping to panel endian */
+        for (int r = 0; r < W; r++) {          /* r: logical x offset */
+            int lx = sx1 - r;                  /* reversed within slice */
+            for (int c = 0; c < H; c++) {      /* c: logical y offset */
+                uint16_t px = s_shadow[(y0 + c) * LCD_H_RES + lx];
+                s_bounce[r * H + c] = __builtin_bswap16(px);
+            }
+        }
+
+        /* native window for this slice */
+        int nx0, nx1, ny0, ny1;
+#if LCD_ROT_CW
+        nx0 = y0 + LCD_NATIVE_XOFF;            /* native col = logical y */
+        nx1 = y1 + LCD_NATIVE_XOFF;
+        ny0 = LCD_NATIVE_H - 1 - sx1;          /* native row = 319 - log x */
+        ny1 = LCD_NATIVE_H - 1 - sx0;
+#else
+        nx0 = LCD_NATIVE_W - 1 - y1 + LCD_NATIVE_XOFF;
+        nx1 = LCD_NATIVE_W - 1 - y0 + LCD_NATIVE_XOFF;
+        ny0 = sx0;
+        ny1 = sx1;
+#endif
+        uint8_t col[4] = { (uint8_t)(nx0 >> 8), (uint8_t)nx0,
+                           (uint8_t)(nx1 >> 8), (uint8_t)nx1 };
+        uint8_t row[4] = { (uint8_t)(ny0 >> 8), (uint8_t)ny0,
+                           (uint8_t)(ny1 >> 8), (uint8_t)ny1 };
+        esp_err_t err = tx_cmd(0x2A, col, 4);
+        if (err == ESP_OK) err = tx_cmd(0x2B, row, 4);
+        if (err == ESP_OK)
+            err = esp_lcd_panel_io_tx_color(g_lcd_io, 0x2C, s_bounce,
+                                            (size_t)W * H * 2);
+        if (err != ESP_OK) return err;
+    }
+    return ESP_OK;
 }
 
 esp_err_t lcd_fill(uint16_t rgb565)
 {
-    static uint16_t line[LCD_H_RES];
-    for (int i = 0; i < LCD_H_RES; i++) line[i] = rgb565;  /* blit swaps */
-    for (int y = 0; y < LCD_V_RES; y++) {
-        esp_err_t err = lcd_blit(0, y, LCD_H_RES, 1, line);
-        if (err != ESP_OK) return err;
-    }
-    return ESP_OK;
+    size_t n = LCD_H_RES * LCD_V_RES;
+    for (size_t i = 0; i < n; i++) s_shadow[i] = rgb565;
+    dirty_mark(0, 0, LCD_H_RES, LCD_V_RES);
+    return lcd_flush();
 }
 
 void lcd_backlight(bool on) { gpio_set_level(LCD_PIN_BL, on ? 0 : 1); }
