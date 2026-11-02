@@ -139,6 +139,59 @@ static void probe_buzzer(void)
     ESP_LOGI(TAG, "buzzer sweep done");
 }
 
+/* ---- LCD diagnostic: fills, border, corner markers, text ------------- */
+
+static void draw_hline(int x, int y, int w, uint16_t c)
+{
+    static uint16_t buf[LCD_H_RES];
+    for (int i = 0; i < w; i++) buf[i] = c;
+    lcd_blit(x, y, w, 1, buf);
+}
+
+static void draw_vline(int x, int y, int h, uint16_t c)
+{
+    uint16_t buf[LCD_V_RES];
+    for (int i = 0; i < h; i++) buf[i] = c;
+    lcd_blit(x, y, 1, h, buf);
+}
+
+static void draw_block(int x, int y, int w, int h, uint16_t c)
+{
+    static uint16_t buf[16 * 16];
+    for (int i = 0; i < w * h; i++) buf[i] = c;
+    for (int r = 0; r < h; r++) lcd_blit(x, y + r, w, 1, buf);
+}
+
+static void probe_lcd_diag(void)
+{
+    /* full-screen color fills */
+    lcd_fill(LCD_RED);    vTaskDelay(pdMS_TO_TICKS(600));
+    lcd_fill(LCD_GREEN);  vTaskDelay(pdMS_TO_TICKS(600));
+    lcd_fill(LCD_BLUE);   vTaskDelay(pdMS_TO_TICKS(600));
+    lcd_fill(LCD_BLACK);
+
+    /* white border, 2 px, full 320x170 active area */
+    draw_hline(0, 0, LCD_H_RES, LCD_WHITE);
+    draw_hline(0, 1, LCD_H_RES, LCD_WHITE);
+    draw_hline(0, LCD_V_RES - 2, LCD_H_RES, LCD_WHITE);
+    draw_hline(0, LCD_V_RES - 1, LCD_H_RES, LCD_WHITE);
+    draw_vline(0, 0, LCD_V_RES, LCD_WHITE);
+    draw_vline(1, 0, LCD_V_RES, LCD_WHITE);
+    draw_vline(LCD_H_RES - 2, 0, LCD_V_RES, LCD_WHITE);
+    draw_vline(LCD_H_RES - 1, 0, LCD_V_RES, LCD_WHITE);
+
+    /* corner markers: red TL, green TR, blue BL, yellow BR (12x12) */
+    draw_block(4, 4, 12, 12, LCD_RED);
+    draw_block(LCD_H_RES - 16, 4, 12, 12, LCD_GREEN);
+    draw_block(4, LCD_V_RES - 16, 12, 12, LCD_BLUE);
+    draw_block(LCD_H_RES - 16, LCD_V_RES - 16, 12, 12, LCD_YELLOW);
+
+    /* centered text lines (17 chars * 8 px = 136; (320-136)/2 = 92) */
+    lcd_text(92, 56, "VARIO LOGGER REV3", LCD_WHITE, LCD_BLACK);
+    lcd_text(128, 72, "LCD DIAG OK", LCD_GREEN, LCD_BLACK);
+    lcd_text(120, 96, "BMP581+QMI OK", LCD_CYAN, LCD_BLACK);
+}
+
 void probe_main(void)
 {
     vTaskDelay(pdMS_TO_TICKS(300));   /* let USB enumerate */
@@ -148,16 +201,9 @@ void probe_main(void)
 
     esp_err_t err = lcd_init();
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "LCD init OK; color fills (look at the screen)");
-        lcd_fill(LCD_RED);    vTaskDelay(pdMS_TO_TICKS(700));
-        lcd_fill(LCD_GREEN);  vTaskDelay(pdMS_TO_TICKS(700));
-        lcd_fill(LCD_BLUE);   vTaskDelay(pdMS_TO_TICKS(700));
-        /* text label test: white on black, two lines */
-        lcd_fill(LCD_BLACK);
-        lcd_text(8, 40, "VARIO LOGGER", LCD_WHITE, LCD_BLACK);
-        lcd_text(8, 56, "PROBE V1", LCD_GREEN, LCD_BLACK);
-        lcd_text(8, 72, "0 1 2 3 4 5", LCD_YELLOW, LCD_BLACK);
-        ESP_LOGI(TAG, "LCD fill+text test done (label should be on screen)");
+        ESP_LOGI(TAG, "LCD init OK; running fill/border/corner/text diag");
+        probe_lcd_diag();
+        ESP_LOGI(TAG, "LCD diag done (border+corners+text should be on screen)");
     } else {
         ESP_LOGE(TAG, "LCD init failed: %s", esp_err_to_name(err));
     }
