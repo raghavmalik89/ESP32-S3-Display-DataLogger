@@ -162,12 +162,11 @@ static void draw_block(int x, int y, int w, int h, uint16_t c)
     for (int r = 0; r < h; r++) lcd_blit(x, y + r, w, 1, buf);
 }
 
-static void probe_lcd_diag(void)
+static void draw_madctl_frame(uint8_t madctl, const char *tag, uint16_t tag_c)
 {
-    /* full-screen color fills */
-    lcd_fill(LCD_RED);    vTaskDelay(pdMS_TO_TICKS(600));
-    lcd_fill(LCD_GREEN);  vTaskDelay(pdMS_TO_TICKS(600));
-    lcd_fill(LCD_BLUE);   vTaskDelay(pdMS_TO_TICKS(600));
+    lcd_set_madctl(madctl);
+    vTaskDelay(pdMS_TO_TICKS(20));
+
     lcd_fill(LCD_BLACK);
 
     /* white border, 2 px, full 320x170 active area */
@@ -180,8 +179,7 @@ static void probe_lcd_diag(void)
     draw_vline(LCD_H_RES - 2, 0, LCD_V_RES, LCD_WHITE);
     draw_vline(LCD_H_RES - 1, 0, LCD_V_RES, LCD_WHITE);
 
-    /* corner markers + 2-char labels distinguish rotation from mirroring:
-     * TL red, TR green, BL blue, BR yellow */
+    /* corner markers + labels */
     draw_block(4, 4, 12, 12, LCD_RED);
     draw_block(LCD_H_RES - 16, 4, 12, 12, LCD_GREEN);
     draw_block(4, LCD_V_RES - 16, 12, 12, LCD_BLUE);
@@ -191,11 +189,39 @@ static void probe_lcd_diag(void)
     lcd_text(20, LCD_V_RES - 12, "BL", LCD_BLUE, LCD_BLACK);
     lcd_text(LCD_H_RES - 36, LCD_V_RES - 12, "BR", LCD_YELLOW, LCD_BLACK);
 
-    /* asymmetric text: reads "ABC123" / "LEFT->RIGHT" / "VARIO LOGGER REV3"
-     * left-to-right, upright, if mirroring is fixed */
+    /* asymmetric text + the MADCTL value of this segment */
     lcd_text(136, 56, "ABC123", LCD_WHITE, LCD_BLACK);
     lcd_text(116, 72, "LEFT->RIGHT", LCD_GREEN, LCD_BLACK);
     lcd_text(92, 88, "VARIO LOGGER REV3", LCD_CYAN, LCD_BLACK);
+    lcd_text(104, 120, tag, tag_c, LCD_BLACK);   /* e.g. "MADCTL=A0" */
+}
+
+static void probe_lcd_diag(void)
+{
+    /* full-screen color fills */
+    lcd_fill(LCD_RED);    vTaskDelay(pdMS_TO_TICKS(600));
+    lcd_fill(LCD_GREEN);  vTaskDelay(pdMS_TO_TICKS(600));
+    lcd_fill(LCD_BLUE);   vTaskDelay(pdMS_TO_TICKS(600));
+
+    /* MADCTL sweep: find the landscape value with no mirroring.
+     * 0x20 (MV)  : horizontal mirror only (observed)
+     * 0xA0 (MY|MV), 0x60 (MX|MV) : the two standard ST7789-class
+     *              landscape normals
+     * 0x30 (ML|MV): ML bit semantics on this SH8601 are nonstandard;
+     *              included for coverage
+     * Loops twice; each segment ~5 s with its value on screen. */
+    static const struct { uint8_t v; const char *s; uint16_t c; } seg[] = {
+        { 0xA0, "MADCTL=A0", LCD_WHITE },
+        { 0x60, "MADCTL=60", LCD_GREEN },
+        { 0x30, "MADCTL=30", LCD_CYAN  },
+        { 0x20, "MADCTL=20", LCD_YELLOW },
+    };
+    for (int round = 0; round < 2; round++) {
+        for (size_t i = 0; i < sizeof(seg) / sizeof(seg[0]); i++) {
+            draw_madctl_frame(seg[i].v, seg[i].s, seg[i].c);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+        }
+    }
 }
 
 void probe_main(void)

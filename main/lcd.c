@@ -102,6 +102,8 @@ static esp_err_t tx_cmd(uint8_t cmd, const uint8_t *data, uint8_t len)
     return esp_lcd_panel_io_tx_param(g_lcd_io, cmd, data, len);
 }
 
+esp_err_t lcd_set_madctl(uint8_t madctl) { return tx_cmd(0x36, &madctl, 1); }
+
 esp_err_t lcd_init(void)
 {
     /* backlight OFF during init — GPIO14 is active LOW on this board:

@@ -14,7 +14,8 @@
 #include <stdint.h>
 
 esp_err_t lcd_init(void);
-esp_err_t lcd_fill(uint16_t rgb565);
+/* runtime MADCTL change (probe sweep; production sets it in the table) */
+esp_err_t lcd_set_madctl(uint8_t madctl);esp_err_t lcd_fill(uint16_t rgb565);
 /* Draw a bitmap at (x,y), size w*h, pixels row-major RGB565. */
 esp_err_t lcd_blit(int x, int y, int w, int h, const uint16_t *pixels);
 /* 8x8 text helpers (font8x8_basic).  Text does not wrap — caller keeps
