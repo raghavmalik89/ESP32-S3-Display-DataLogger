@@ -180,16 +180,22 @@ static void probe_lcd_diag(void)
     draw_vline(LCD_H_RES - 2, 0, LCD_V_RES, LCD_WHITE);
     draw_vline(LCD_H_RES - 1, 0, LCD_V_RES, LCD_WHITE);
 
-    /* corner markers: red TL, green TR, blue BL, yellow BR (12x12) */
+    /* corner markers + 2-char labels distinguish rotation from mirroring:
+     * TL red, TR green, BL blue, BR yellow */
     draw_block(4, 4, 12, 12, LCD_RED);
     draw_block(LCD_H_RES - 16, 4, 12, 12, LCD_GREEN);
     draw_block(4, LCD_V_RES - 16, 12, 12, LCD_BLUE);
     draw_block(LCD_H_RES - 16, LCD_V_RES - 16, 12, 12, LCD_YELLOW);
+    lcd_text(20, 6, "TL", LCD_RED, LCD_BLACK);
+    lcd_text(LCD_H_RES - 36, 6, "TR", LCD_GREEN, LCD_BLACK);
+    lcd_text(20, LCD_V_RES - 12, "BL", LCD_BLUE, LCD_BLACK);
+    lcd_text(LCD_H_RES - 36, LCD_V_RES - 12, "BR", LCD_YELLOW, LCD_BLACK);
 
-    /* centered text lines (17 chars * 8 px = 136; (320-136)/2 = 92) */
-    lcd_text(92, 56, "VARIO LOGGER REV3", LCD_WHITE, LCD_BLACK);
-    lcd_text(128, 72, "LCD DIAG OK", LCD_GREEN, LCD_BLACK);
-    lcd_text(120, 96, "BMP581+QMI OK", LCD_CYAN, LCD_BLACK);
+    /* asymmetric text: reads "ABC123" / "LEFT->RIGHT" / "VARIO LOGGER REV3"
+     * left-to-right, upright, if mirroring is fixed */
+    lcd_text(136, 56, "ABC123", LCD_WHITE, LCD_BLACK);
+    lcd_text(116, 72, "LEFT->RIGHT", LCD_GREEN, LCD_BLACK);
+    lcd_text(92, 88, "VARIO LOGGER REV3", LCD_CYAN, LCD_BLACK);
 }
 
 void probe_main(void)

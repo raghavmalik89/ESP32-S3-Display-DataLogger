@@ -34,13 +34,18 @@ esp_lcd_panel_io_handle_t g_lcd_io;
 typedef struct { uint8_t cmd; uint8_t data[16]; uint8_t len; uint8_t delay_ms; } lcd_cmd_t;
 
 /* SH8601-style table (Waveshare ESP-IDF 07_LVGL_Test / 08_FactoryProgram),
- * landscape MADCTL 0x70, Y gap 35.  COLMOD 0x3A=0x55 (RGB565) is REQUIRED:
+ * landscape MADCTL, Y gap 35.  COLMOD 0x3A=0x55 (RGB565) is REQUIRED:
  * the esp_lcd_sh8601 driver sends it before the vendor table (its
  * panel_init does MADCTL, COLMOD, then table); after hardware reset the
  * part is not in 16-bit mode, and without this every pixel stream is
  * misinterpreted (short fills, commands eaten as data). */
 static const lcd_cmd_t s_init_sh8601[] = {
-    {0x36, {0x70}, 1, 0},                                  /* MADCTL landscape */
+    {0x36, {0x20}, 1, 0},                                  /* MADCTL: MV only
+        * (landscape, no mirrors).  Waveshare's Rotate demo uses 0x70
+        * (MX|MV|ML) which mirrors the landscape image on both axes —
+        * bench photo confirmed: text mirrored, line order flipped.  With
+        * MV=1, MX flips the logical Y and MY/ML flip logical X, so the
+        * un-mirrored landscape needs MV alone. */
     {0x3A, {0x55}, 1, 0},                                  /* COLMOD RGB565 */
     {0xB2, {0x0c, 0x0c, 0x00, 0x33, 0x33}, 5, 0},
     {0xB7, {0x35}, 1, 0},
