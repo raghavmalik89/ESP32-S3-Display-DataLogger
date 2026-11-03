@@ -29,3 +29,5 @@ _rst.bin
 # local test captures and ad-hoc sdkconfig snapshots
 /data/
 sdkconfig.logger
+*.exe
+*.pdb
