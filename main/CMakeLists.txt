@@ -19,10 +19,12 @@ if(CONFIG_LOGGER_PROBE_MODE)
     )
 else()
     idf_component_register(
-        SRCS "main.c" ${COMMON_SRCS}
+        SRCS "main.c" "logger.c" "acq.c" "app_state.c" "audio.c" "btn.c" "gui.c"
+             "tx.c" "rec.c" "sd_sink.c" "filters.c" "vario_core.c"
+             "baro_proc.c" ${COMMON_SRCS}
         INCLUDE_DIRS "."
         REQUIRES esp_driver_i2c esp_driver_spi esp_driver_ledc esp_driver_gpio
-                 esp_driver_sdmmc esp_driver_usb_serial_jtag esp_lcd
+                 esp_driver_sdmmc esp_driver_usb_serial_jtag esp_adc esp_lcd
                  fatfs sdmmc esp_timer freertos
     )
 endif()

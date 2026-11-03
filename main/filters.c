@@ -113,10 +113,8 @@ static void c03_refit(c03_state_t *s, float dt)
     }
     float q00 = q * (dt * dt * dt * dt / 4.f);
     float q01 = q * (dt * dt * dt / 2.f);
-    float q11 = q * (dt * dt);
     float pp00 = p00 + 2.f * dt * p01 + dt * dt * p11 + q00;
     float pp01 = p01 + dt * p11 + q01;
-    float pp11 = p11 + q11;
     float S = pp00 + r;
     s->k0 = pp00 / S;
     s->k1 = pp01 / S;

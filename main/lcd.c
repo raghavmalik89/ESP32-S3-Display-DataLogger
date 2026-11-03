@@ -312,6 +312,14 @@ esp_err_t lcd_fill(uint16_t rgb565)
     return lcd_flush();
 }
 
+esp_err_t lcd_clear(uint16_t rgb565)
+{
+    size_t n = LCD_H_RES * LCD_V_RES;
+    for (size_t i = 0; i < n; i++) s_shadow[i] = rgb565;
+    dirty_mark(0, 0, LCD_H_RES, LCD_V_RES);
+    return ESP_OK;
+}
+
 void lcd_backlight(bool on) { gpio_set_level(LCD_PIN_BL, on ? 0 : 1); }
 
 esp_err_t lcd_char(int x, int y, char c, uint16_t fg, uint16_t bg)
