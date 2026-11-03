@@ -320,7 +320,7 @@ esp_err_t lcd_char(int x, int y, char c, uint16_t fg, uint16_t bg)
     const uint8_t *g = font8x8_basic[(uint8_t)c & 0x7F];
     for (int row = 0; row < 8; row++) {
         for (int col = 0; col < 8; col++) {
-            bool on = (g[row] >> (7 - col)) & 1;
+            bool on = (g[row] >> col) & 1;      /* table is LSB-first */
             buf[row * 8 + col] = on ? fg : bg;
         }
     }

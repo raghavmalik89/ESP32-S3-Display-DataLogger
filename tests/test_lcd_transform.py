@@ -39,7 +39,7 @@ def lcd_char(sh, x, y, ch, fg, bg):
     g = FONT[ord(ch) & 0x7F]
     for row in range(8):
         for col in range(8):
-            on = (g[row] >> (7 - col)) & 1          # firmware: 7 - col (MSB first)
+            on = (g[row] >> col) & 1             # firmware: LSB-first table
             sh[y + row][x + col] = fg if on else bg
 
 def lcd_text(sh, x, y, s, fg, bg):
@@ -132,14 +132,32 @@ if not inv_ok:
 
 # ---- check 3: font readability proof --------------------------------------
 # Render each character of ABC123 upright in a terminal using the SAME
-# firmware bit order.  If the glyphs below read as letters, the firmware
-# bit order is correct.
+# firmware bit order, AND assert the asymmetric glyphs (2, L, R) match
+# their known-correct patterns — symmetric glyphs (A/B/C) cannot prove
+# bit order on their own.
 print("Font render (firmware bit order, upright):")
 for ch in "ABC123":
     g = FONT[ord(ch)]
-    art = "".join("".join("#" if (g[r] >> (7 - c)) & 1 else "." for c in range(8)) + "\n"
+    art = "".join("".join("#" if (g[r] >> c) & 1 else "." for c in range(8)) + "\n"
                   for r in range(8))
     print(f" {ch}:\n{art}")
+
+# known-correct LSB-first renderings (hand-derived from the glyph bytes;
+# orientation is unambiguous: 2's upper stub is on the right, L's stroke
+# on the left, R's leg kicking right — symmetric glyphs can't prove this)
+EXPECT_2 = [".####...", "##..##..", "....##..", "..###...", ".##.....",
+            "##..##..", "######..", "........"]
+EXPECT_L = ["####....", ".##.....", ".##.....", ".##.....", ".##...#.",
+            ".##..##.", "#######.", "........"]
+EXPECT_R = ["######..", ".##..##.", ".##..##.", ".#####..", ".##.##..",
+            ".##..##.", "###..##.", "........"]
+for ch, expect in (("2", EXPECT_2), ("L", EXPECT_L), ("R", EXPECT_R)):
+    g = FONT[ord(ch)]
+    got = ["".join("#" if (g[r] >> c) & 1 else "." for c in range(8))
+           for r in range(8)]
+    if got != expect:
+        fails.append(f"glyph {ch} does not match known-correct pattern:\n"
+                     + "\n".join(got))
 
 # ---- check 4: native view, rotated back to landscape ----------------------
 # L[y][x] = native[319-x][y+XOFF] is exactly what an observer sees when
