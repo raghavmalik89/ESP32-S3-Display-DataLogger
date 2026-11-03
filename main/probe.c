@@ -23,6 +23,7 @@
 #include "driver/ledc.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -37,6 +38,7 @@ static const char *TAG = "probe";
 static void probe_whoami(uint8_t addr)
 {
     uint8_t v;
+    esp_err_t err;
     i2c_master_dev_handle_t dev;
     i2c_device_config_t dc = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -46,8 +48,116 @@ static void probe_whoami(uint8_t addr)
     if (i2c_master_bus_add_device(g_i2c_bus, &dc, &dev) != ESP_OK) return;
 
     /* QMI8658C: reg 0x00 -> 0x05 */
-    if (i2c_read_reg8(dev, 0x00, &v) == ESP_OK && v == 0x05)
-        ESP_LOGI(TAG, "addr 0x%02x: QMI8658C (WHO_AM_I 0x05)", addr);
+    v = 0xAA;
+    err = i2c_read_reg8(dev, 0x00, &v);
+    ESP_LOGI(TAG, "addr 0x%02x reg0x00: err=%d val=0x%02x", addr, err, v);
+    /* read again after 100 ms in case the part needs wake-up time */
+    vTaskDelay(pdMS_TO_TICKS(100));
+    v = 0xAA;
+    err = i2c_read_reg8(dev, 0x00, &v);
+    ESP_LOGI(TAG, "addr 0x%02x reg0x00 (retry): err=%d val=0x%02x", addr,
+             err, v);
+    /* hypothesis: QMI8658 powers up with its register block held in reset;
+     * issue the soft-reset command, wait, then read WHO_AM_I again */
+    {
+        uint8_t rst[2] = { 0x60, 0xB0 };
+        esp_err_t werr = i2c_master_transmit(dev, rst, 2,
+                                             pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+        vTaskDelay(pdMS_TO_TICKS(60));
+        v = 0xAA;
+        err = i2c_read_reg8(dev, 0x00, &v);
+        ESP_LOGI(TAG, "addr 0x%02x reg0x00 (after reset, werr=%d): err=%d "
+                 "val=0x%02x", addr, werr, err, v);
+        /* register dump 0x00..0x0F + STATUS0 — is ANY register non-zero? */
+        char dump[80];
+        int n = snprintf(dump, sizeof(dump), "regs:");
+        for (uint8_t reg = 0x00; reg <= 0x0F; reg++) {
+            uint8_t rv = 0xEE;
+            if (i2c_read_reg8(dev, reg, &rv) != ESP_OK) rv = 0xFF;
+            n += snprintf(dump + n, sizeof(dump) - n, " %02x=%02x", reg, rv);
+        }
+        ESP_LOGI(TAG, "addr 0x%02x %s", addr, dump);
+        /* cali command then status + whoami */
+        uint8_t cali[2] = { 0x09, 0xA2 };
+        i2c_master_transmit(dev, cali, 2, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+        vTaskDelay(pdMS_TO_TICKS(2500));
+        uint8_t s0 = 0xEE;
+        i2c_read_reg8(dev, 0x2E, &s0);
+        v = 0xAA;
+        err = i2c_read_reg8(dev, 0x00, &v);
+        ESP_LOGI(TAG, "addr 0x%02x after cali: status0=0x%02x whoami err=%d "
+                 "val=0x%02x", addr, s0, err, v);
+        /* two-phase transaction (STOP then START) instead of repeated start */
+        {
+            uint8_t reg0 = 0x00;
+            uint8_t twophase = 0xAA;
+            esp_err_t e1 = i2c_master_transmit(dev, &reg0, 1,
+                                               pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+            esp_err_t e2 = i2c_master_receive(dev, &twophase, 1,
+                                              pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+            ESP_LOGI(TAG, "addr 0x%02x two-phase: e1=%d e2=%d val=0x%02x",
+                     addr, e1, e2, twophase);
+            /* hypothesis: CTRL1 bit4 "sensor enable" gates ID readback.
+             * Write CTRL1 = 0x60 (per known-good init sequences), then
+             * re-read WHO_AM_I (0x00) and REVISION_ID (0x01). */
+            uint8_t en[2] = { 0x02, 0x60 };
+            esp_err_t e3 = i2c_master_transmit(dev, en, 2,
+                                               pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+            vTaskDelay(pdMS_TO_TICKS(10));
+            uint8_t who = 0xAA, rev = 0xAA, ctrl1 = 0xAA;
+            esp_err_t e4 = i2c_read_reg8(dev, 0x00, &who);
+            i2c_read_reg8(dev, 0x01, &rev);
+            esp_err_t e5 = i2c_read_reg8(dev, 0x02, &ctrl1);
+            ESP_LOGI(TAG, "addr 0x%02x after CTRL1=0x60: werr=%d rd err=%d/%d "
+                     "WHO=0x%02x REV=0x%02x CTRL1rd=0x%02x", addr, e3, e4, e5,
+                     who, rev, ctrl1);
+            /* also try 0x40 variant */
+            uint8_t en2[2] = { 0x02, 0x40 };
+            i2c_master_transmit(dev, en2, 2, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+            vTaskDelay(pdMS_TO_TICKS(10));
+            who = 0xAA; rev = 0xAA;
+            i2c_read_reg8(dev, 0x00, &who);
+            i2c_read_reg8(dev, 0x01, &rev);
+            ESP_LOGI(TAG, "addr 0x%02x after CTRL1=0x40: WHO=0x%02x REV=0x%02x",
+                     addr, who, rev);
+            /* functional test: full accel+gyro enable, then read STATUS0
+             * (0x2E) and the 12 data bytes at 0x35 twice, 500 ms apart.
+             * If the chip is alive but only the ID readback is odd, the
+             * data registers will show DRDY and changing values. */
+            uint8_t full[8][2] = {
+                { 0x02, 0x60 },  /* CTRL1: I2C + enable */
+                { 0x03, 0x00 },  /* CTRL2: accel off (set below) */
+                { 0x04, 0x00 },  /* CTRL3: gyro off */
+                { 0x05, 0x11 },  /* CTRL4: no lpf */
+                { 0x06, 0x00 },  /* CTRL5 */
+                { 0x08, 0x03 },  /* CTRL7: enable accel+gyro */
+            };
+            for (int k = 0; k < 6; k++)
+                i2c_master_transmit(dev, full[k], 2,
+                                    pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+            /* accel 200 Hz, 16g: CTRL2 = 0x2A; gyro 2000dps: CTRL3 = 0x36 */
+            uint8_t a2[2] = { 0x03, 0x2A };
+            uint8_t g2[2] = { 0x04, 0x36 };
+            i2c_master_transmit(dev, a2, 2, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+            i2c_master_transmit(dev, g2, 2, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+            vTaskDelay(pdMS_TO_TICKS(100));
+            for (int pass = 0; pass < 2; pass++) {
+                uint8_t s0 = 0xEE;
+                i2c_read_reg8(dev, 0x2E, &s0);
+                uint8_t d[12];
+                memset(d, 0xEE, sizeof(d));
+                uint8_t dreg = 0x35;
+                esp_err_t de = i2c_master_transmit_receive(
+                    dev, &dreg, 1, d, 12, pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+                ESP_LOGI(TAG, "addr 0x%02x functional pass %d: status0=0x%02x "
+                         "derr=%d data=%02x%02x %02x%02x %02x%02x %02x%02x "
+                         "%02x%02x %02x%02x", addr, pass, s0, de,
+                         d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
+                         d[8], d[9], d[10], d[11]);
+                vTaskDelay(pdMS_TO_TICKS(500));
+            }
+        }
+    }
     /* LSM6DS family: reg 0x0F */
     if (i2c_read_reg8(dev, 0x0F, &v) == ESP_OK) {
         switch (v) {
@@ -70,8 +180,173 @@ static void probe_whoami(uint8_t addr)
     i2c_master_bus_rm_device(dev);
 }
 
+/* Waveshare demo (working reference) reads WHO_AM_I=0x05 directly on
+ * GPIO47/48 @ 300 kHz.  Ours uses the new i2c_master driver @ 100 kHz
+ * and gets 0x00 (IDF 6.1 removed the legacy driver, so same new-driver
+ * transport at both speeds).  Isolates bus-speed vs dead-silicon. */
+static void legacy_i2c_whoami(void)
+{
+    const uint32_t speeds[2] = { 300 * 1000, 100 * 1000 };
+    for (int s = 0; s < 2; s++) {
+        i2c_master_bus_config_t bc = {
+            .clk_source = I2C_CLK_SRC_DEFAULT,
+            .i2c_port = I2C_NUM_0,
+            .sda_io_num = 47,
+            .scl_io_num = 48,
+            .glitch_ignore_cnt = 7,
+            .flags.enable_internal_pullup = true,
+        };
+        i2c_master_bus_handle_t bus;
+        esp_err_t e = i2c_new_master_bus(&bc, &bus);
+        i2c_device_config_t dc = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address = 0x6B,
+            .scl_speed_hz = speeds[s],
+        };
+        i2c_master_dev_handle_t dev = NULL;
+        if (e == ESP_OK) e = i2c_master_bus_add_device(bus, &dc, &dev);
+        ESP_LOGI(TAG, "new-driver @%lu kHz: init err=%d",
+                 (unsigned long)(speeds[s] / 1000), e);
+        if (e == ESP_OK) {
+            uint8_t reg = 0x00;
+            for (int i = 0; i < 5; i++) {
+                uint8_t v = 0xAA;
+                esp_err_t re = i2c_master_transmit_receive(
+                    dev, &reg, 1, &v, 1, pdMS_TO_TICKS(1000));
+                ESP_LOGI(TAG, "@%luk WHO_AM_I try %d: err=%d val=0x%02x",
+                         (unsigned long)(speeds[s] / 1000), i, re, v);
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+        }
+        if (dev) i2c_master_bus_rm_device(dev);
+        if (bus) i2c_del_master_bus(bus);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+/* Bit-banged I2C last resort: full control of START/setup/hold timing,
+ * in case the ESP32-S3 hardware I2C driver's edges disagree with the
+ * chip on this board (legacy Arduino driver is gone from IDF 6.1). */
+#define BB_SDA 47
+#define BB_SCL 48
+#define BB_HALF_US 6
+
+static void bb_release(int pin) { gpio_set_level(pin, 1); }
+static bool bb_read(int pin) { return gpio_get_level(pin) != 0; }
+
+static void bb_start(void)
+{
+    bb_release(BB_SDA);
+    bb_release(BB_SCL);
+    esp_rom_delay_us(BB_HALF_US);
+    gpio_set_level(BB_SDA, 0);
+    esp_rom_delay_us(BB_HALF_US);
+    gpio_set_level(BB_SCL, 0);
+    esp_rom_delay_us(BB_HALF_US);
+}
+
+static void bb_stop(void)
+{
+    gpio_set_level(BB_SDA, 0);
+    esp_rom_delay_us(BB_HALF_US);
+    bb_release(BB_SCL);
+    esp_rom_delay_us(BB_HALF_US);
+    bb_release(BB_SDA);
+    esp_rom_delay_us(BB_HALF_US);
+}
+
+static bool bb_write_byte(uint8_t b)
+{
+    for (int i = 7; i >= 0; i--) {
+        gpio_set_level(BB_SDA, (b >> i) & 1);
+        esp_rom_delay_us(BB_HALF_US);
+        bb_release(BB_SCL);
+        esp_rom_delay_us(BB_HALF_US * 2);
+        gpio_set_level(BB_SCL, 0);
+        esp_rom_delay_us(BB_HALF_US);
+    }
+    bb_release(BB_SDA);
+    esp_rom_delay_us(BB_HALF_US);
+    bb_release(BB_SCL);
+    esp_rom_delay_us(BB_HALF_US);
+    bool ack = !bb_read(BB_SDA);
+    gpio_set_level(BB_SCL, 0);
+    esp_rom_delay_us(BB_HALF_US);
+    return ack;
+}
+
+static uint8_t bb_read_byte(bool ack)
+{
+    uint8_t b = 0;
+    bb_release(BB_SDA);
+    for (int i = 7; i >= 0; i--) {
+        esp_rom_delay_us(BB_HALF_US);
+        bb_release(BB_SCL);
+        esp_rom_delay_us(BB_HALF_US);
+        if (bb_read(BB_SDA)) b |= (uint8_t)(1 << i);
+        esp_rom_delay_us(BB_HALF_US);
+        gpio_set_level(BB_SCL, 0);
+        esp_rom_delay_us(BB_HALF_US);
+    }
+    gpio_set_level(BB_SDA, !ack);
+    esp_rom_delay_us(BB_HALF_US);
+    bb_release(BB_SCL);
+    esp_rom_delay_us(BB_HALF_US * 2);
+    gpio_set_level(BB_SCL, 0);
+    esp_rom_delay_us(BB_HALF_US);
+    bb_release(BB_SDA);
+    return b;
+}
+
+static void bitbang_whoami(void)
+{
+    gpio_config_t io = {
+        .pin_bit_mask = (1ULL << BB_SDA) | (1ULL << BB_SCL),
+        .mode = GPIO_MODE_INPUT_OUTPUT_OD,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    };
+    gpio_config(&io);
+    bb_release(BB_SDA);
+    bb_release(BB_SCL);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    for (int t = 0; t < 5; t++) {
+        bb_start();
+        bool a1 = bb_write_byte(0x6B << 1);         /* address + W */
+        bool a2 = bb_write_byte(0x00);              /* register 0 */
+        bb_start();                                 /* repeated start */
+        bool a3 = bb_write_byte((0x6B << 1) | 1);   /* address + R */
+        uint8_t v = bb_read_byte(false);
+        bb_stop();
+        ESP_LOGI(TAG, "bitbang WHO_AM_I try %d: acks=%d%d%d val=0x%02x",
+                 t, a1, a2, a3, v);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    /* also read REVISION_ID 0x01 and CTRL1 0x02 for reference */
+    bb_start();
+    bb_write_byte(0x6B << 1);
+    bb_write_byte(0x01);
+    bb_start();
+    bb_write_byte((0x6B << 1) | 1);
+    uint8_t rev = bb_read_byte(false);
+    bb_stop();
+    bb_start();
+    bb_write_byte(0x6B << 1);
+    bb_write_byte(0x02);
+    bb_start();
+    bb_write_byte((0x6B << 1) | 1);
+    uint8_t c1 = bb_read_byte(false);
+    bb_stop();
+    ESP_LOGI(TAG, "bitbang REV=0x%02x CTRL1=0x%02x", rev, c1);
+}
+
 static void probe_i2c(void)
 {
+    legacy_i2c_whoami();
+    bitbang_whoami();
+
+
     ESP_ERROR_CHECK(i2c_bus_init());
     ESP_LOGI(TAG, "I2C bus up: SDA=%d SCL=%d @ %d kHz", I2C_SDA_GPIO,
              I2C_SCL_GPIO, I2C_FREQ_HZ / 1000);
