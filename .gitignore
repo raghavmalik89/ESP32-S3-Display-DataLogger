@@ -24,3 +24,4 @@ flashes/
 *.key
 secrets/
 
+_rst.bin

@@ -194,7 +194,11 @@ static void probe_lcd_diag(void)
     lcd_text(136, 56, "ABC123", LCD_WHITE, LCD_BLACK);
     lcd_text(116, 72, "LEFT->RIGHT", LCD_GREEN, LCD_BLACK);
     lcd_text(92, 88, "VARIO LOGGER REV3", LCD_CYAN, LCD_BLACK);
-    lcd_text(104, 120, "SW ROT V1", LCD_YELLOW, LCD_BLACK);
+#if LCD_ROT_CW
+    lcd_text(104, 120, "ROT CW", LCD_YELLOW, LCD_BLACK);
+#else
+    lcd_text(104, 120, "ROT CCW", LCD_YELLOW, LCD_BLACK);
+#endif
 
     lcd_flush();
 }

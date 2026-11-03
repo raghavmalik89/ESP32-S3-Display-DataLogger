@@ -39,6 +39,11 @@ void lcd_release(void);   /* tear down (probe mode switches tables) */
 #define LCD_CYAN    0x07FF
 #define LCD_GRAY    0x8410
 
+/* software-rotation direction (see lcd.c) */
+#ifndef LCD_ROT_CW
+#define LCD_ROT_CW 1
+#endif
+
 extern esp_lcd_panel_handle_t g_lcd_panel;
 extern esp_lcd_panel_io_handle_t g_lcd_io;
 

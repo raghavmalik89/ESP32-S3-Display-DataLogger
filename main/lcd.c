@@ -31,6 +31,7 @@
 #include "esp_lcd_panel_commands.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include <stdlib.h>
 #include <string.h>
@@ -44,14 +45,27 @@ esp_lcd_panel_io_handle_t g_lcd_io;
 #define LCD_NATIVE_H    320
 #define LCD_NATIVE_XOFF 35
 
-#ifndef LCD_ROT_CW
-#define LCD_ROT_CW 1
-#endif
-
 /* flush slice width (logical px); bounds the bounce buffer size */
 #define FLUSH_SLICE_W 24
-/* max dirty height is LCD_V_RES (170); bounce = W*H uint16 in DMA RAM */
-static uint16_t s_bounce[FLUSH_SLICE_W * LCD_V_RES];
+/* max dirty height is LCD_V_RES (170); bounce = W*H uint16 in DMA RAM.
+ * TWO slices so the CPU can pack slice N+1 while DMA still reads slice N. */
+static uint16_t s_bounce[2][FLUSH_SLICE_W * LCD_V_RES];
+
+/* DMA completion bookkeeping: a counting semaphore owns the two bounce
+ * buffers.  Take = buffer free, give (from the panel-IO color-done
+ * callback) = its DMA transfer finished.  A buffer is never refilled
+ * while its transfer is outstanding. */
+static SemaphoreHandle_t s_buf_sem;
+static int s_buf_idx;
+
+static bool on_color_trans_done(esp_lcd_panel_io_handle_t panel_io,
+                                esp_lcd_panel_io_event_data_t *edata,
+                                void *user_ctx)
+{
+    BaseType_t hp = pdFALSE;
+    xSemaphoreGiveFromISR(s_buf_sem, &hp);
+    return hp == pdTRUE;
+}
 
 /* landscape shadow framebuffer (PSRAM preferred) */
 static uint16_t *s_shadow;
@@ -160,6 +174,16 @@ esp_err_t lcd_init(void)
                                    &io_cfg, &g_lcd_io);
     if (err != ESP_OK) return err;
 
+    /* bounce-buffer completion sync: two buffers, both start free */
+    s_buf_sem = xSemaphoreCreateCounting(2, 2);
+    s_buf_idx = 0;
+    if (!s_buf_sem) return ESP_ERR_NO_MEM;
+    const esp_lcd_panel_io_callbacks_t io_cbs = {
+        .on_color_trans_done = on_color_trans_done,
+    };
+    err = esp_lcd_panel_io_register_event_callbacks(g_lcd_io, &io_cbs, NULL);
+    if (err != ESP_OK) return err;
+
     /* hardware reset */
     gpio_set_level(LCD_PIN_RST, 0);
     vTaskDelay(pdMS_TO_TICKS(20));
@@ -206,14 +230,41 @@ esp_err_t lcd_flush(void)
         if (sx1 > x1) sx1 = x1;
         int W = sx1 - sx0 + 1;
 
-        /* rotate slice into bounce, byte-swapping to panel endian */
-        for (int r = 0; r < W; r++) {          /* r: logical x offset */
-            int lx = sx1 - r;                  /* reversed within slice */
-            for (int c = 0; c < H; c++) {      /* c: logical y offset */
+        /* wait for a free bounce buffer: its previous DMA transfer, if
+         * any, has fully completed (color-done callback gave the token) */
+        if (xSemaphoreTake(s_buf_sem, portMAX_DELAY) != pdTRUE)
+            return ESP_FAIL;
+        uint16_t *bounce = s_bounce[s_buf_idx];
+        s_buf_idx ^= 1;
+
+        /* rotate slice into bounce, byte-swapping to panel endian.
+         * Packing order must match the native window below AND the panel's
+         * default (no-MADCTL) scan: address increments along native X
+         * within a row, rows advance along native Y -> row-major with
+         * bounce[r * H + c], r = native-row index, c = native-col index.
+         *
+         * CW  (LCD_ROT_CW=1): native_x = logical_y + 35,
+         *                     native_y = 319 - logical_x
+         * CCW (LCD_ROT_CW=0): native_x = 169 - logical_y + 35,
+         *                     native_y = logical_x              */
+#if LCD_ROT_CW
+        for (int r = 0; r < W; r++) {          /* r -> native row 319-sx1+r */
+            int lx = sx1 - r;                  /* native_y = 319 - lx */
+            for (int c = 0; c < H; c++) {      /* c -> native col y0+35+c */
                 uint16_t px = s_shadow[(y0 + c) * LCD_H_RES + lx];
-                s_bounce[r * H + c] = __builtin_bswap16(px);
+                bounce[r * H + c] = __builtin_bswap16(px);
             }
         }
+#else
+        for (int r = 0; r < W; r++) {          /* r -> native row sx0+r */
+            int lx = sx0 + r;                  /* native_y = lx */
+            for (int c = 0; c < H; c++) {      /* c -> native col 169-y1+35+c */
+                int ly = y1 - c;
+                uint16_t px = s_shadow[ly * LCD_H_RES + lx];
+                bounce[r * H + c] = __builtin_bswap16(px);
+            }
+        }
+#endif
 
         /* native window for this slice */
         int nx0, nx1, ny0, ny1;
@@ -235,10 +286,21 @@ esp_err_t lcd_flush(void)
         esp_err_t err = tx_cmd(0x2A, col, 4);
         if (err == ESP_OK) err = tx_cmd(0x2B, row, 4);
         if (err == ESP_OK)
-            err = esp_lcd_panel_io_tx_color(g_lcd_io, 0x2C, s_bounce,
+            err = esp_lcd_panel_io_tx_color(g_lcd_io, 0x2C, bounce,
                                             (size_t)W * H * 2);
-        if (err != ESP_OK) return err;
+        if (err != ESP_OK) {
+            xSemaphoreGive(s_buf_sem);         /* return the token we took */
+            return err;
+        }
     }
+
+    /* drain: wait until every outstanding color transfer has completed so
+     * lcd_flush() returns with all pixels committed (also guarantees the
+     * shadow framebuffer can be safely rewritten by the next draw) */
+    for (int i = 0; i < 2; i++)
+        xSemaphoreTake(s_buf_sem, portMAX_DELAY);
+    xSemaphoreGive(s_buf_sem);
+    xSemaphoreGive(s_buf_sem);
     return ESP_OK;
 }
 
