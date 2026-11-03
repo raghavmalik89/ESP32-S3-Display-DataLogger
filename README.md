@@ -67,11 +67,19 @@ Module map (all under `main/`):
 |---|---|---|
 | `i2c_bus` | Shared I²C init, reg helpers, bus-reset recovery | Verified |
 | `bmp581` | Pressure/temp raw24 driver (from validated legacy code) | Verified on bench |
-| `qmi8658c` | Compact QMI driver: soft reset + cal, STATUS0 polling | Verified on bench |
+| `qmi8658c` | Compact QMI driver: soft reset + cal, STATUS0 polling | Driver proven earlier; **part currently unresponsive (hardware)** |
 | `imu_lsm6dsv16x` + `lsm6dsv16x_reg` | ST official driver, bus-wedge recovery | Compiled; hardware deferred |
-| `lcd` + `font8x8_basic` | Panel driver + 8×8 font (see `docs/LCD.md`) | Rotated render pending final visual sign-off |
-| `probe` | Bench diagnostics | Verified |
-| `baro_proc`, `estimators`, `tx`, `audio`, `gui`, `btn`, `rec`, `sd_sink` | Production pipeline | **Planned — not yet integrated** |
+| `lcd` + `font8x8_basic` | Panel driver + 8×8 font (see `docs/LCD.md`) | Verified (user sign-off) |
+| `filters` | C03/D01/S4/S5 estimator bank, host-verified vs Python reference | Verified |
+| `acq` | 40 Hz baro (+200 Hz IMU when present) acquisition, never blocks | Verified baro-only on bench |
+| `tx` | USB text-protocol TX, per-stream seq, host handshake, SD mirror | Verified with `tools/capture.py` |
+| `gui` | 10 fps three-screen render, REC chrome, hold-progress bar | Flashed; button bench pending |
+| `btn` | BOOT gestures: click cycles screens, 10 s holds act once | Flashed; button bench pending |
+| `audio` | LEDC vario tone, hysteresis latch | Implemented; not acoustically verified |
+| `rec` | Recording state machine (IDLE / USB STREAM / USB+HOST / SD SAVED) | Flashed; bench pending |
+| `sd_sink` | SDMMC 1-bit backend, graceful when no card | Compiled; physically untested |
+| `app_state` | Shared application state | — |
+| `probe` | Bench diagnostics (build-time `CONFIG_LOGGER_PROBE_MODE`) | Verified |
 
 ## GUI (three screens)
 
@@ -139,14 +147,14 @@ console lines.
 | Feature | State |
 |---|---|
 | I²C bus @ 100 kHz, BMP581 @ 0x47 (CHIP_ID 0x50) | ✅ Verified on COM6 bench |
-| QMI8658C @ 0x6B (WHO_AM_I 0x05), live accel ~1 g | ✅ Verified |
-| LCD: colors, border, corners, text via software rotation | ⚠️ Flashed; awaiting final visual sign-off |
-| Buzzer sweep driver | ⚠️ Implemented; **not acoustically verified** |
-| Landscape rotation (software, MADCTL-free) | ⚠️ Implemented; pending confirmation |
+| LCD: landscape via software rotation, correct text/corners | ✅ Verified (user sign-off) |
+| Production firmware (acq→filters→GUI→audio→USB) | ✅ Flashed; baro-only stream verified |
+| USB streaming: B 40 Hz + V 20 Hz, 0 gaps, meta + handshake | ✅ Verified via `tools/capture.py` |
+| QMI8658C @ 0x6B | ❌ Part unresponsive — reads 0x00 on all registers except CTRL1; proven **not** a firmware issue (driver, speed, bit-bang, reset, power-cycle all ruled out). Hardware investigation pending. Logger runs baro-only. See `docs/SENSORS.md` |
+| GUI screens + BOOT gestures | ⚠️ Compiled and flashed; physical button bench pending |
+| Vario audio (LEDC buzzer, hysteresis latch) | ⚠️ Implemented; **not acoustically verified** |
+| SD recording backend | ⚠️ Software ready (graceful when no card); **physically untested** |
 | External ST LSM6DSV16X | ⏸️ Driver compiled; bring-up deferred |
-| Production firmware (sensors→filters→GUI→audio→USB) | 📋 In progress |
-| Host capture tool (`tools/capture.py`) | 📋 Adaptation from v1 protocol pending |
-| SD recording | 📋 Software only; **physically untested** |
 | Battery, enclosure, PCB | 📋 Deferred |
 
 Legend: ✅ verified on hardware · ⚠️ implemented, verification pending ·

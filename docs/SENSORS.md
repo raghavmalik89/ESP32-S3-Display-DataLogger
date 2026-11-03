@@ -20,24 +20,34 @@
   guard sits before the estimator bank. Running-mean p0 is forbidden
   by design.
 
-## QMI8658C IMU — address 0x6B (verified, onboard)
+## QMI8658C IMU — address 0x6B (onboard — currently unresponsive)
 
-- WHO_AM_I register 0x00 = 0x05 (probe-confirmed).
+> **Status 2026-11-03: hardware-level fault.** The part ACKs at 0x6B and
+> register 0x02 (CTRL1) reads its true power-on default 0x20 and latches
+> written values, but **every other register reads 0x00** (WHO_AM_I,
+> REVISION_ID, STATUS0, all data registers) and the sensor never starts.
+> Ruled out by dedicated probe firmware (`probe.c`):
+> new `i2c_master` driver @ 100 kHz **and** @ 300 kHz (Waveshare demo
+> speed), software bit-bang I²C with fully controlled timing (perfect
+> ACKs, still 0x00), soft reset (0x60←0xB0), CTRL9 calibrate (0xA2),
+> CTRL1 sensor-enable writes (0x60/0x40), two-phase STOP+START reads,
+> and a full USB power-cycle of the board. Conclusion: not fixable in
+> firmware. Next steps are hardware-side (logic analyzer, scope, or
+> board replacement). The logger runs baro-only in the meantime;
+> `acq.c` already degrades gracefully (`imu=off` in the `#C` meta).
+
+Historical notes (from when the part responded):
+
+- WHO_AM_I register 0x00 = 0x05.
 - Init (from Waveshare's working demo — required, do not skip):
   1. soft reset: write 0xB0 to register 0x60, 50 ms;
   2. on-demand calibration: CTRL9 (0x09) = 0xA2, wait 2200 ms, CTRL9 = 0;
   3. CTRL8 = 0xC0, CTRL1 = 0x60;
   4. CTRL2 = 0x25 (±8 g, 250 Hz), CTRL3 = 0x55 (±500 dps, 250 Hz);
   5. CTRL7 = 0x03 (accel + gyro enable), CTRL5 LPF off.
-  Without the soft reset + cali sequence the part (as shipped from the
-  factory demo) never asserts data-ready.
 - **STATUS0 is register 0x2E** — 0x2F is STATUS1 (CMD_DONE/WAKEUP bits).
-  Polling 0x2F for DRDY never sees new data (bench-found bug).
 - Data: 12-byte burst from 0x35 (Ax…Gz), little-endian per axis.
 - Scales: ±8 g → 4096 LSB/g; ±500 dps → 65.5 LSB/dps.
-- Bench observation: static accel vector ≈ 0.99 g (board tilted);
-  gyro shows a small static bias (~−0.9/−5.6 dps on X/Y) — expected to
-  be handled by estimator configuration.
 
 ## LSM6DSV16X — external, address 0x6A/0x6B (deferred)
 
@@ -51,5 +61,7 @@
 
 ## Status legend
 
-- BMP581 + QMI8658C: ✅ verified live on COM6.
+- BMP581: ✅ verified live on COM6.
+- QMI8658C: ❌ part unresponsive (hardware-level, see above); logger
+  runs baro-only until hardware investigation.
 - LSM6DSV16X: ⏸️ compiled, hardware deferred.
