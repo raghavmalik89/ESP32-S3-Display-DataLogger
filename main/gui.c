@@ -254,7 +254,7 @@ static void draw_status(void)
                   rec_dot_color() == REC_DOT_GREEN ? C_GOOD : C_WARN;
     text_r(308, 131, rec_status_text(), cc, C_CARD);
 
-    hint("HOLD 10s: START/STOP REC");
+    hint("HOLD 5s: START/STOP REC");
 }
 
 /* ---------------- screen 1: history ---------------- */
@@ -323,7 +323,7 @@ static void draw_history(void)
     text(gx + gw / 2 - 8, gy + gh + 4, ln, C_DIM, C_BG);
     text_r(gx + gw, gy + gh + 4, "NOW", C_DIM, C_BG);
 
-    hint("HOLD 10s: CHANGE WINDOW");
+    hint("HOLD 5s: CHANGE WINDOW");
 }
 
 /* ---------------- screen 2: vario ---------------- */
@@ -374,7 +374,7 @@ static void draw_vario(void)
     snprintf(ln, sizeof(ln), "%.0f m", g_app.alt_m);
     text2(136, 133, ln, C_TXT, C_CARD);
 
-    hint("HOLD 10s: CHANGE FILTER");
+    hint("HOLD 5s: CHANGE FILTER");
 }
 
 /* ---------------- events + task ---------------- */

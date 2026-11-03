@@ -14,7 +14,7 @@
 
 #define DEBOUNCE_MS      20
 #define CLICK_MAX_MS     600
-#define HOLD_MS          10000
+#define HOLD_MS          5000
 #define POLL_MS          20
 
 static QueueHandle_t s_ev;

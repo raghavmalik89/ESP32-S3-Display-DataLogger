@@ -44,7 +44,7 @@ USB to a host capture tool, and (in software) recorded to SD.
 | LCD DC / CS / RST | 11 / 12 / 9 | |
 | LCD backlight | 14 | **Active low** (GPIO low = on) |
 | Buzzer | 16 | LEDC PWM, 400–3500 Hz |
-| BOOT button | 0 | Short click = screen cycle; 10 s hold = context action |
+| BOOT button | 0 | Short click = screen cycle; 5 s hold = context action |
 | WS2812 RGB ×2 | 15 | Reserved |
 | SD CLK / CMD / D0 | 41 / 39 / 40 | SDMMC 1-bit |
 | Battery ADC | 4 | ADC1_CH3 |
@@ -74,7 +74,7 @@ Module map (all under `main/`):
 | `acq` | 40 Hz baro (+200 Hz IMU when present) acquisition, never blocks | Verified baro-only on bench |
 | `tx` | USB text-protocol TX, per-stream seq, host handshake, SD mirror | Verified with `tools/capture.py` |
 | `gui` | 10 fps three-screen render, REC chrome, hold-progress bar | Flashed; button bench pending |
-| `btn` | BOOT gestures: click cycles screens, 10 s holds act once | Flashed; button bench pending |
+| `btn` | BOOT gestures: click cycles screens, 5 s holds act once | Flashed; button bench pending |
 | `audio` | LEDC vario tone, hysteresis latch | Implemented; not acoustically verified |
 | `rec` | Recording state machine (IDLE / USB STREAM / USB+HOST / SD SAVED) | Flashed; bench pending |
 | `sd_sink` | SDMMC 1-bit backend, graceful when no card | Compiled; physically untested |
@@ -86,10 +86,10 @@ Module map (all under `main/`):
 Design target, 320×170 landscape:
 
 1. **Status / Recording** — filter name, battery, sensor health,
-   record state; 10 s hold starts/stops recording.
+   record state; 5 s hold starts/stops recording.
 2. **Graph** — scrolling signal trace (pressure / altitude / vario
-   selectable); 10 s hold changes the graphed signal.
-3. **Vario** — large numeric climb/sink readout; 10 s hold cycles the
+   selectable); 5 s hold changes the graphed signal.
+3. **Vario** — large numeric climb/sink readout; 5 s hold cycles the
    selected filter C03 → D01 → S4 → S5 → C03.
 
 A record dot is persistent on **every** screen while recording.

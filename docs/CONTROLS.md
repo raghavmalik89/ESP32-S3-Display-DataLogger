@@ -15,9 +15,9 @@ with debounce.
 | Gesture | Effect |
 |---------|--------|
 | **Short click** (press + release < hold threshold) | Cycle the three GUI screens: Recording/Status → Graph → Vario → back to Recording/Status |
-| **10-second hold** on Recording/Status screen | Start / stop recording |
-| **10-second hold** on Graph screen | Cycle the history window: 10 s → 30 s → 60 s → 120 s → 300 s → 10 s… (default 60 s) |
-| **10-second hold** on Vario screen | Cycle vario filter: C03 → D01 → S4 → S5 → C03 |
+| **5-second hold** on Recording/Status screen | Start / stop recording |
+| **5-second hold** on Graph screen | Cycle the history window: 10 s → 30 s → 60 s → 120 s → 300 s → 10 s… (default 60 s) |
+| **5-second hold** on Vario screen | Cycle vario filter: C03 → D01 → S4 → S5 → C03 |
 | **Release before 10 s** during a hold | Cancels the hold action — nothing happens |
 | **Tap during startup** | Ignored until the system is initialized **and** the button has been released (prevents a held button at boot from triggering actions) |
 
@@ -54,7 +54,7 @@ green only after a successful flush + close.
 
 ## Screen ↔ hold-action matrix (summary)
 
-| Screen | Short click | 10 s hold |
+| Screen | Short click | 5 s hold |
 |--------|-------------|-----------|
 | Recording/Status | → History | start/stop recording |
 | History | → Vario | cycle window 10→30→60→120→300 s |

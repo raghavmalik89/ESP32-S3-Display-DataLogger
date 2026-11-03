@@ -2,8 +2,8 @@
  *
  * Contract (docs/CONTROLS.md, frozen):
  *   short click (< 600 ms press)  -> BTN_CLICK  (screen cycle)
- *   hold to 10.0 s                -> BTN_HOLD   (context action, fires once)
- *   release before 10 s           -> cancelled, no event
+ *   hold to 5.0 s                 -> BTN_HOLD   (context action, fires once)
+ *   release before 5 s            -> cancelled, no event
  *   after BTN_HOLD fires          -> button must be released to rearm
  *   press at boot                 -> ignored until released once
  *
