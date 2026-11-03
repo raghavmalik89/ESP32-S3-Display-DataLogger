@@ -127,16 +127,35 @@ esp_err_t acq_init(void)
     g_app.qmi_ok = s_have_qmi;
     ESP_LOGI(TAG, "QMI8658C %s", s_have_qmi ? "ok" : "MISSING");
 
-    /* external ST IMU: only possible on the address the QMI does NOT own */
-    uint8_t st_addr = s_have_qmi ? 0x6A : 0x6B;
-    s_have_st = lsm_imu_init(&s_st, g_i2c_bus, st_addr) == ESP_OK;
+    /* External ST IMU: probe BOTH addresses by identity (WHO_AM_I 0x70 =
+     * LSM6DSV16X).  The old complement-probe ("the address the QMI does
+     * NOT own") was wrong: a missing/dead QMI made us look for the ST
+     * only at 0x6A, masking a live ST on 0x6B.  Address conflict: if the
+     * ST answers on the address the QMI already owns, both chips would
+     * share one address — refuse to run it and demand a physical fix. */
+    s_have_st = false;
+    uint8_t st_addr = 0;
+    const uint8_t st_cand[2] = { 0x6B, 0x6A };
+    for (int i = 0; i < 2 && !s_have_st; i++) {
+        if (lsm_imu_init(&s_st, g_i2c_bus, st_cand[i]) != ESP_OK)
+            continue;
+        if (s_have_qmi && st_cand[i] == s_qmi.addr) {
+            ESP_LOGE(TAG, "ST IMU @0x%02x conflicts with live QMI address — "
+                     "physical fix required (ST SA0 pin / isolation)",
+                     st_cand[i]);
+            s_st.ok = false;
+            break;
+        }
+        s_have_st = true;
+        st_addr = st_cand[i];
+    }
     g_app.st_ok = s_have_st;
     g_app.st_addr = st_addr;
     if (s_have_st)
         ESP_LOGI(TAG, "external ST IMU ok @0x%02x", st_addr);
     else
-        ESP_LOGI(TAG, "external ST IMU not present @0x%02x (ok: optional)",
-                 st_addr);
+        ESP_LOGI(TAG, "external ST IMU not present (last id 0x%02x, "
+                 "ok: optional)", s_st.whoami);
 
     for (int f = 0; f < FILT_N; f++)
         g_filters[f].reset(s_fstate[f]);

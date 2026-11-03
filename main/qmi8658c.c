@@ -17,8 +17,13 @@
 #define R_CTRL3    0x04
 #define R_CTRL5    0x06
 #define R_CTRL7    0x08
-#define R_CTRL8    0x0A
-#define R_CTRL9    0x09
+/* Datasheet (QMI8658C Rev 0.9): CTRL8 = 0x09 "Motion Detection Control",
+ * CTRL9 = 0x0A "Host Commands".  These two were swapped here previously,
+ * so the on-demand cali command 0xA2 was landing in CTRL8 (motion detect)
+ * and the 0xC0 pin-config value was landing in CTRL9 (host commands) —
+ * a plausible contributor to the part wedging after init. */
+#define R_CTRL8    0x09
+#define R_CTRL9    0x0A
 #define R_RESET    0x60
 #define R_STATUS0  0x2E   /* bit0 DRDY_A, bit1 DRDY_G */
 #define R_AXL      0x35   /* Ax_L .. Gz_H: 12 consecutive bytes */
