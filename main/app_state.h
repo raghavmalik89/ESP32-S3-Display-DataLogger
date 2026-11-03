@@ -15,21 +15,15 @@
 extern "C" {
 #endif
 
-/* graph signals (Graph screen, 10s-hold cycles them) */
-enum {
-    GS_VARIO = 0,     /* filtered vertical speed, m/s  (zero-referenced) */
-    GS_ALT,           /* barometric altitude, m */
-    GS_PRESS,         /* pressure, hPa */
-    GS_ACCZ,          /* vertical accel, g (zero-referenced) */
-    GS_N
-};
-extern const char *g_graph_names[GS_N];
-
 #define SCREEN_STATUS 0
 #define SCREEN_GRAPH  1
 #define SCREEN_VARIO  2
 #define SCREEN_N      3
 extern const char *g_screen_names[SCREEN_N];
+
+/* graph time windows (Graph screen, 10 s hold cycles them; default 60 s) */
+#define GRAPH_WINDOW_N 5
+extern const int g_graph_windows[GRAPH_WINDOW_N];   /* 10/30/60/120/300 s */
 
 typedef struct {
     /* ---- acquisition ---- */
@@ -70,7 +64,7 @@ typedef struct {
     int screen;                   /* SCREEN_* */
     int btn_held;                 /* 1 while BOOT pressed (debounced) */
     float hold_frac;              /* 0..1 hold progress; <0 = not holding */
-    int graph_signal;             /* GS_* */
+    int graph_window_idx;         /* index into g_graph_windows */
 
     /* ---- recording ---- */
     volatile int rec_active;
@@ -79,21 +73,17 @@ typedef struct {
     uint32_t rec_session;         /* monotonically increasing session id */
     uint32_t rec_start_ms;
     uint32_t rec_frames;          /* data frames emitted this session */
+    volatile uint32_t sd_err;     /* SD open/write/flush/close failures */
 
     /* ---- storage ---- */
     int sd_present;               /* microSD mounted at boot */
+    uint64_t sd_total_bytes;      /* card capacity (cached at mount) */
+    uint64_t sd_free_bytes;       /* free space (cached; mount/close refresh) */
+    float stream_bps;             /* measured protocol bytes/s (EMA, tx.c) */
     uint32_t boot_ms;             /* boot timestamp (esp_timer ms domain) */
 } app_t;
 
 extern app_t g_app;
-
-/* graph history rings (owned by acq.c; read via gui under g_app_mu) */
-#define HIST_N 320                  /* 8 s of baro-rate samples at 40 Hz */
-extern float g_hist_vario[HIST_N];
-extern float g_hist_alt[HIST_N];
-extern float g_hist_press[HIST_N];  /* hPa */
-extern float g_hist_accz[HIST_N];   /* g */
-extern volatile uint32_t g_hist_head; /* monotonically increasing write index */
 
 /* 10 s running-average vario of the selected filter (maintained by acq.c) */
 float app_vario_avg10s(void);

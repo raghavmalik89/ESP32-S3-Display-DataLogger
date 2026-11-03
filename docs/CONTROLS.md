@@ -1,8 +1,9 @@
 # Button Controls — BOOT / GPIO0
 
-> **Status: specified contract, not yet implemented.** `btn.c` is part of the
-> pending production firmware. This document is the behavior it must implement;
-> it is a frozen constraint from the Rev 3.0 plan and must not be redesigned.
+> **Status: implemented** (`btn.c`). Frozen interaction contract from the
+> Rev 3.0 plan, updated by GUI Rev 2 (graph hold now cycles the time
+> window instead of the signal — signal cycling was removed with the
+> single-vertical-speed trace).
 
 ## Input
 
@@ -15,7 +16,7 @@ with debounce.
 |---------|--------|
 | **Short click** (press + release < hold threshold) | Cycle the three GUI screens: Recording/Status → Graph → Vario → back to Recording/Status |
 | **10-second hold** on Recording/Status screen | Start / stop recording |
-| **10-second hold** on Graph screen | Change the graphed signal |
+| **10-second hold** on Graph screen | Cycle the history window: 10 s → 30 s → 60 s → 120 s → 300 s → 10 s… (default 60 s) |
 | **10-second hold** on Vario screen | Cycle vario filter: C03 → D01 → S4 → S5 → C03 |
 | **Release before 10 s** during a hold | Cancels the hold action — nothing happens |
 | **Tap during startup** | Ignored until the system is initialized **and** the button has been released (prevents a held button at boot from triggering actions) |
@@ -30,9 +31,18 @@ with debounce.
 
 ## Recording indicator
 
-A recording indicator (dot/icon) is shown **persistently on every screen**
-while a session is active — including after cycling away from the Recording
-screen. Stopping the session clears it everywhere.
+A storage dot is shown **persistently on every screen**, same position
+(top right), driven by actual backend state (GUI Rev 2 honesty contract):
+
+| Color | Meaning |
+|-------|---------|
+| **RED** | Confirmed persistent SD write active and succeeding (session file open, fwrite-confirmed bytes flowing, no SD error) |
+| **GREEN** | Writable media available (SD mounted), no recording in progress |
+| **YELLOW** | Warning: no card, volatile USB-only stream (incl. host-confirmed), or SD fault |
+
+A REC command never alone turns the dot red: a failed SD session start
+falls back to the volatile USB stream and stays yellow; red returns to
+green only after a successful flush + close.
 
 ## Boot-time safety
 
@@ -46,6 +56,6 @@ screen. Stopping the session clears it everywhere.
 
 | Screen | Short click | 10 s hold |
 |--------|-------------|-----------|
-| Recording/Status | → Graph | start/stop recording |
-| Graph | → Vario | change graph signal |
+| Recording/Status | → History | start/stop recording |
+| History | → Vario | cycle window 10→30→60→120→300 s |
 | Vario | → Recording/Status | cycle filter C03→D01→S4→S5 |

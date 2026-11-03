@@ -52,6 +52,10 @@ bool tx_push_imu(const acq_imu_evt_t *evt)
     return false;
 }
 
+/* measured protocol byte rate for the recording-time-left estimate */
+static uint32_t s_bps_acc;
+static int64_t s_bps_last_us;
+
 /* write one complete line; drop it whole if it cannot be sent now.
  * When an SD session is active the line is mirrored to the card. */
 static void emit(const char *line, int len)
@@ -61,10 +65,23 @@ static void emit(const char *line, int len)
         if (g_app.rec_backend == 2)
             sd_write(line, (size_t)len);
     }
-    if (!usb_serial_jtag_is_connected()) {
-        g_app.err_overflow++;
-        return;
+    s_bps_acc += (uint32_t)len;
+    int64_t now = esp_timer_get_time();
+    if (now - s_bps_last_us >= 1000000) {
+        float inst = s_bps_acc * 1e6f / (float)(now - s_bps_last_us);
+        /* 5 s EMA; first sample seeds it */
+        g_app.stream_bps = (g_app.stream_bps <= 0.f)
+                               ? inst
+                               : g_app.stream_bps * 0.8f + inst * 0.2f;
+        s_bps_acc = 0;
+        s_bps_last_us = now;
     }
+    /* No host attached: lines simply have nowhere to go.  When an SD
+     * session owns the data this is not an error at all; when idle it is
+     * expected behavior, not a buffer overflow — so only a failed write
+     * to an ATTACHED host counts as err_overflow. */
+    if (!usb_serial_jtag_is_connected())
+        return;
     int w = usb_serial_jtag_write_bytes(line, len, 0);
     if (w != len)
         g_app.err_overflow++;
@@ -194,6 +211,7 @@ esp_err_t tx_init(void)
 
 esp_err_t tx_start(void)
 {
+    s_bps_last_us = esp_timer_get_time();
     return xTaskCreate(tx_task, "tx", 3072, NULL, tskIDLE_PRIORITY + 5,
                        NULL) == pdPASS ? ESP_OK : ESP_FAIL;
 }

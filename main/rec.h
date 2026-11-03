@@ -26,6 +26,13 @@ const char *rec_status_text(void);
 /* recording duration in seconds (0 when idle) */
 uint32_t rec_duration_s(void);
 
+/* persistent storage indicator, same position on every screen:
+ *   RED   — confirmed persistent SD write active and succeeding
+ *   GREEN — writable media available, no recording in progress
+ *   YELLOW— warning: no card, volatile USB-only stream, or SD fault */
+enum { REC_DOT_RED = 0, REC_DOT_GREEN = 1, REC_DOT_YELLOW = 2 };
+int rec_dot_color(void);
+
 #ifdef __cplusplus
 }
 #endif

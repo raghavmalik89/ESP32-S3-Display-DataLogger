@@ -151,9 +151,9 @@ console lines.
 | Production firmware (acq→filters→GUI→audio→USB) | ✅ Flashed; baro-only stream verified |
 | USB streaming: B 40 Hz + V 20 Hz, 0 gaps, meta + handshake | ✅ Verified via `tools/capture.py` |
 | QMI8658C @ 0x6B | ❌ Part unresponsive — reads 0x00 on all registers except CTRL1; proven **not** a firmware issue (driver, speed, bit-bang, reset, power-cycle all ruled out). Hardware investigation pending. Logger runs baro-only. See `docs/SENSORS.md` |
-| GUI screens + BOOT gestures | ⚠️ Compiled and flashed; physical button bench pending |
+| GUI Rev 2 (mockup layouts, 300 s history + window cycling, storage dot, SD capacity bar, time-left estimate) | ✅ Flashed, streaming; visual sign-off + button bench pending |
 | Vario audio (LEDC buzzer, hysteresis latch) | ⚠️ Implemented; **not acoustically verified** |
-| SD recording backend | ⚠️ Software ready (graceful when no card); **physically untested** |
+| SD backend | ✅ Card mounts (32 GB SDHC); write/flush/close paths instrumented, **session bench test pending** |
 | External ST LSM6DSV16X | ⏸️ Driver compiled; bring-up deferred |
 | Battery, enclosure, PCB | 📋 Deferred |
 

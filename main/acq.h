@@ -10,6 +10,7 @@
 #define ACQ_H
 
 #include <stdint.h>
+#include "config.h"
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -39,6 +40,20 @@ esp_err_t acq_start(void);
 /* select the active filter (FILT_*).  Filters are never reset on switch:
  * each keeps its own converged state, so switching causes no spikes. */
 void acq_select_filter(int f);
+
+/* ---- vertical-speed history ring (Graph screen) ----
+ * 300 s of the selected filter's vario at the baro rate (40 Hz), owned and
+ * written by the acq task.  Sample i (i < g_hist_head) was taken at
+ * i / BMP581_P_HZ seconds after boot; the GUI downsamples min/max per
+ * column.  48 KB of DRAM. */
+#define HIST_SECONDS 300
+#define HIST_N (HIST_SECONDS * BMP581_P_HZ)
+extern float g_hist_vario[HIST_N];
+extern volatile uint32_t g_hist_head;   /* total samples ever written */
+
+/* variance-free window lookup: newest sample index, and how many samples
+ * of the last `win_s` seconds are actually available */
+uint32_t acq_hist_available(uint32_t win_s);
 
 #ifdef __cplusplus
 }

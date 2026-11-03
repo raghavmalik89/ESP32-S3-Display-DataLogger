@@ -30,9 +30,15 @@
 static const char *TAG = "acq";
 
 app_t g_app;
-float g_hist_vario[HIST_N], g_hist_alt[HIST_N];
-float g_hist_press[HIST_N], g_hist_accz[HIST_N];
+float g_hist_vario[HIST_N];
 volatile uint32_t g_hist_head;
+
+uint32_t acq_hist_available(uint32_t win_s)
+{
+    uint32_t want = win_s * BMP581_P_HZ;
+    uint32_t have = g_hist_head;
+    return have < want ? have : want;
+}
 
 static bmp581_t s_bmp;
 static qmi_imu_t s_qmi;
@@ -95,7 +101,7 @@ esp_err_t acq_init(void)
     memset(&g_app, 0, sizeof(g_app));
     g_app.sel_filter = FILT_C03;          /* C03 is the default */
     g_app.screen = SCREEN_STATUS;
-    g_app.graph_signal = GS_VARIO;
+    g_app.graph_window_idx = 2;           /* 60 s default window */
     g_app.hold_frac = -1.f;
     g_app.boot_ms = (uint32_t)(esp_timer_get_time() / 1000);
 
@@ -170,12 +176,9 @@ static void acq_baro_read(void)
                                    (float)(1.0 / BMP581_P_HZ));
     audio_update(v[sel], t_s, fault);
 
-    /* graph history (baro-rate; accz from the latest IMU sample) */
+    /* vertical-speed history ring (selected filter, baro rate) */
     uint32_t h = g_hist_head;
     g_hist_vario[h % HIST_N] = v[sel];
-    g_hist_alt[h % HIST_N] = alt;
-    g_hist_press[h % HIST_N] = pr / 64.0f / 100.f;   /* hPa */
-    g_hist_accz[h % HIST_N] = g_app.acc[2] / (float)IMU_A_LSB_PER_G;
     g_hist_head = h + 1;
 
     /* 10 s average of the selected filter */
