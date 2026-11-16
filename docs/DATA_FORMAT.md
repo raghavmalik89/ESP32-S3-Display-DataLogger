@@ -28,14 +28,24 @@
 | `#D` | `key=value, ...` | Device inventory, e.g. `bmp581=ok@0x47,qmi8658c=absent,st_imu=absent@0x6b,sd=absent` |
 | `#C` | `key=value, ...` | Config: `p_hz`, `i_hz`, `imu=on/off`, `backend=usb/sd/none`, `filters=C03/D01/S4/S5` |
 | `#R` | `reason` | (Re)boot / attach reason: `poweron`, `host_attach` |
+| `#I` | see below | 1 Hz I²C timing instrumentation (bench), Firmware Reliability Rev 1 |
+
+`#I` fields (per-second snapshot; durations include in-driver retries):
+`#I,usec, b,n,fail,max_us,p99_us, q,..., s,..., stq,stale_qmi,sts,stale_st,
+jm,jit_max_us,ja,jit_avg_us,qh,tx_q_high,nak,tmo,ovf,bd,baro_drops,id,imu_drops`
+Device order is `b`=BMP581, `q`=QMI8658C, `s`=ST IMU.  Counters after the
+histograms are cumulative; host tools diff consecutive `#I` frames.
 
 **Host attach:** opening the CDC port does **not** reset the ESP32-S3. The
 firmware re-emits meta ~2.5 s after a new host attaches, so a capture tool
 that connects to an already-running board still receives the inventory.
 
-**Host handshake:** the capture tool sends `G,1` when it starts grabbing and
-`G,0` when it stops (the firmware accepts any received `1`/`0` byte). The
-flag drives the record-status backend (USB STREAM vs USB+HOST).
+**Host commands** (one line per command, `\n`-terminated; each is acked
+with a `#K,...` line that bypasses the recorder):
+`G,0/1` confirmed-capture flag · `C,0/1` stop/start a recording session
+(same lifecycle as the 5 s BOOT hold) · `Q,0/1` QMI8658C reads on/off ·
+`T,0/1` ST IMU reads on/off · `P,0/1` BMP581 reads on/off (bench only;
+the buzzer is vetoed while the baro is off).
 
 ## Data frames
 

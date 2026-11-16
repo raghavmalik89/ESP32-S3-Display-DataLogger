@@ -41,6 +41,14 @@ esp_err_t acq_start(void);
  * each keeps its own converged state, so switching causes no spikes. */
 void acq_select_filter(int f);
 
+/* ---- bench-only runtime sensor switches (host commands; diagnostics) ----
+ * Disable/enable read scheduling per sensor WITHOUT re-init, for the
+ * Firmware Reliability Rev 1 timing matrix.  Disabling the baro also
+ * forces the audio veto (no stale beeps from frozen data). */
+void acq_bench_qmi(int on);
+void acq_bench_st(int on);
+void acq_bench_baro(int on);
+
 /* ---- vertical-speed history ring (Graph screen) ----
  * 300 s of the selected filter's vario at the baro rate (40 Hz), owned and
  * written by the acq task.  Sample i (i < g_hist_head) was taken at

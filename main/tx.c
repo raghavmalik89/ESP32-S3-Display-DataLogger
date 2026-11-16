@@ -122,7 +122,7 @@ static void emit(const char *line, int len)
 
 static void emitf(const char *fmt, ...)
 {
-    char buf[160];
+    char buf[288];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -160,10 +160,83 @@ void tx_event_filter(int filter)
           (unsigned long long)(esp_timer_get_time()), filter_id(filter));
 }
 
+/* ---- 1 Hz I2C instrumentation frame (#I), Task 2 bench -----------------
+ * Per-second snapshot of the acq-side counters: per-sensor call count,
+ * failures, worst and p99 transaction duration (incl. in-driver retries
+ * and recovery), stale-sample counts, baro schedule jitter, TX queue
+ * high-water and the global drop/NAK/timeout counters.  Meta-comment
+ * frame: never mirrored into SD recordings... actually mirrored like any
+ * other frame while recording, which is exactly what the recording-load
+ * bench needs. */
+static uint32_t s_hist_snap[3][8];
+static uint32_t s_n_snap[3], s_fail_snap[3], s_max_snap[3];
+
+static void i2c_snapshot(void)
+{
+    for (int d = 0; d < 3; d++) {
+        s_n_snap[d] = g_app.i2c_n[d];
+        g_app.i2c_n[d] = 0;
+        s_fail_snap[d] = g_app.i2c_fail[d];
+        g_app.i2c_fail[d] = 0;
+        s_max_snap[d] = g_app.i2c_max_us[d];
+        g_app.i2c_max_us[d] = 0;
+        memcpy(s_hist_snap[d], g_app.i2c_hist[d], sizeof(s_hist_snap[d]));
+        memset(g_app.i2c_hist[d], 0, sizeof(g_app.i2c_hist[d]));
+    }
+}
+
+/* p99 = upper bound (us) of the bucket where the cumulative count
+ * reaches ceil(99% of calls) */
+static uint32_t i2c_p99(int d)
+{
+    static const uint32_t hi[8] =
+        { 250, 500, 1000, 2000, 4000, 8000, 16000, 0xFFFFFFFFu };
+    uint32_t n = s_n_snap[d];
+    if (n == 0) return 0;
+    uint32_t need = (n * 99 + 99) / 100;
+    uint32_t acc = 0;
+    for (int b = 0; b < 8; b++) {
+        acc += s_hist_snap[d][b];
+        if (acc >= need) return hi[b];
+    }
+    return 0xFFFFFFFFu;
+}
+
+static void emit_i2c_stat(void)
+{
+    i2c_snapshot();
+    uint32_t javg = g_app.baro_jit_n
+                        ? g_app.baro_jit_sum_us / g_app.baro_jit_n : 0;
+    uint32_t jmax = g_app.baro_jit_max_us;
+    g_app.baro_jit_n = 0;
+    g_app.baro_jit_sum_us = 0;
+    g_app.baro_jit_max_us = 0;
+    emitf("#I,%llu,"
+          "b,%lu,%lu,%lu,%lu,q,%lu,%lu,%lu,%lu,s,%lu,%lu,%lu,%lu,"
+          "stq,%lu,sts,%lu,jm,%lu,ja,%lu,qh,%lu,nak,%lu,tmo,%lu,"
+          "ovf,%lu,bd,%lu,id,%lu\n",
+          (unsigned long long)esp_timer_get_time(),
+          (unsigned long)s_n_snap[0], (unsigned long)s_fail_snap[0],
+          (unsigned long)s_max_snap[0], (unsigned long)i2c_p99(0),
+          (unsigned long)s_n_snap[1], (unsigned long)s_fail_snap[1],
+          (unsigned long)s_max_snap[1], (unsigned long)i2c_p99(1),
+          (unsigned long)s_n_snap[2], (unsigned long)s_fail_snap[2],
+          (unsigned long)s_max_snap[2], (unsigned long)i2c_p99(2),
+          (unsigned long)g_app.imu_stale[0], (unsigned long)g_app.imu_stale[1],
+          (unsigned long)jmax, (unsigned long)javg,
+          (unsigned long)g_app.tx_q_high,
+          (unsigned long)g_app.err_nak, (unsigned long)g_app.err_timeout,
+          (unsigned long)g_app.err_overflow, (unsigned long)g_app.baro_dropped,
+          (unsigned long)g_app.imu_dropped);
+}
+
 /* host commands, one line per command, '\n' terminated:
  *   G,0 / G,1   stop/start confirmed-capture flag (legacy handshake)
  *   C,0 / C,1   stop/start a recording session (same lifecycle as the
  *               BOOT hold — request is executed by the TX task)
+ *   Q,0 / Q,1   QMI8658C read scheduling off/on (bench)
+ *   T,0 / T,1   external ST IMU read scheduling off/on (bench)
+ *   P,0 / P,1   BMP581 read scheduling off/on (bench; buzzer vetoed)
  * Acks are written to the USB port directly (never emit(): an ack must
  * not land inside a recording file). */
 static void poll_host_cmd(void)
@@ -196,6 +269,18 @@ static void poll_host_cmd(void)
             rec_request(v != 0);
             alen = snprintf(ack, sizeof(ack), "#K,C,%d\n", v != 0);
             break;
+        case 'Q':   /* QMI8658C reads on/off (bench) */
+            acq_bench_qmi(v);
+            alen = snprintf(ack, sizeof(ack), "#K,Q,%d\n", v != 0);
+            break;
+        case 'T':   /* external ST IMU reads on/off (bench) */
+            acq_bench_st(v);
+            alen = snprintf(ack, sizeof(ack), "#K,T,%d\n", v != 0);
+            break;
+        case 'P':   /* BMP581 reads on/off (bench; buzzer vetoed while off) */
+            acq_bench_baro(v);
+            alen = snprintf(ack, sizeof(ack), "#K,P,%d\n", v != 0);
+            break;
         default:
             alen = snprintf(ack, sizeof(ack), "#K,?\n");
             break;
@@ -213,6 +298,7 @@ static void tx_task(void *arg)
     ESP_LOGI(TAG, "tx task up; host %s", s_last_conn ? "connected" : "absent");
 
     TickType_t last_v = 0;
+    uint32_t last_i_ms = 0;
     for (;;) {
         tx_drain();
 
@@ -220,6 +306,13 @@ static void tx_task(void *arg)
          * this task is the only context that opens/closes the session
          * file, so file writes and the GUI can never race */
         rec_poll();
+
+        /* 1 Hz I2C timing instrumentation (Task 2 bench) */
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (now_ms - last_i_ms >= 1000) {
+            last_i_ms = now_ms;
+            emit_i2c_stat();
+        }
 
         /* V frame at 20 Hz: selected filter estimate (mm/s, mm) */
         TickType_t now = xTaskGetTickCount();

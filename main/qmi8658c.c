@@ -44,21 +44,9 @@ static esp_err_t rd(qmi_imu_t *q, uint8_t reg, uint8_t *buf, size_t len)
                                        pdMS_TO_TICKS(I2C_TIMEOUT_MS));
 }
 
-esp_err_t qmi_imu_init(qmi_imu_t *q, i2c_master_bus_handle_t bus, uint8_t addr)
+static esp_err_t qmi_imu_configure(qmi_imu_t *q)
 {
-    memset(q, 0, sizeof(*q));
-    q->bus = bus;
-    q->addr = addr;
-
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = addr,
-        .scl_speed_hz = I2C_FREQ_HZ,
-    };
-    esp_err_t err = i2c_master_bus_add_device(bus, &dev_cfg, &q->dev);
-    if (err != ESP_OK) return err;
-
-    err = i2c_read_reg8(q->dev, R_WHOAMI, &q->whoami);
+    esp_err_t err = i2c_read_reg8(q->dev, R_WHOAMI, &q->whoami);
     if (err != ESP_OK || q->whoami != QMI8658_WHOAMI) {
         q->ok = false;
         return ESP_ERR_NOT_FOUND;
@@ -95,6 +83,35 @@ esp_err_t qmi_imu_init(qmi_imu_t *q, i2c_master_bus_handle_t bus, uint8_t addr)
     vTaskDelay(pdMS_TO_TICKS(10));
     q->ok = true;
     return ESP_OK;
+}
+
+esp_err_t qmi_imu_init(qmi_imu_t *q, i2c_master_bus_handle_t bus, uint8_t addr)
+{
+    memset(q, 0, sizeof(*q));
+    q->bus = bus;
+    q->addr = addr;
+
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = addr,
+        .scl_speed_hz = I2C_FREQ_HZ,
+    };
+    esp_err_t err = i2c_master_bus_add_device(bus, &dev_cfg, &q->dev);
+    if (err != ESP_OK) return err;
+
+    err = qmi_imu_configure(q);
+    if (err != ESP_OK) {
+        /* MCU reset can leave the slave holding SDA (mid-transaction
+         * wedge) — the documented DEF-020 failure mode on the ST, and
+         * the QMI proved intermittently deaf on its first boot touch
+         * (2026-11-16: consecutive cold boots NACKed WHOAMI at 0x6B
+         * after the board sat idle for two weeks).  Clock out the stuck
+         * byte and probe once more before declaring the part missing. */
+        i2c_master_bus_reset(bus);
+        vTaskDelay(pdMS_TO_TICKS(20));
+        err = qmi_imu_configure(q);
+    }
+    return err;
 }
 
 esp_err_t qmi_imu_read(qmi_imu_t *q, int16_t out[7], bool *fresh)

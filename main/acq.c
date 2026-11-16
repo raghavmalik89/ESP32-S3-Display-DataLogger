@@ -50,6 +50,36 @@ static adc_oneshot_unit_handle_t s_adc;
 static adc_cali_handle_t s_adc_cali;
 static bool s_bat_ok;
 
+/* ---- bench-only runtime sensor switches (host commands) ---- */
+static volatile int s_en_qmi = 1, s_en_st = 1, s_en_baro = 1;
+
+void acq_bench_qmi(int on) { s_en_qmi = on ? 1 : 0; }
+void acq_bench_st(int on) { s_en_st = on ? 1 : 0; }
+void acq_bench_baro(int on)
+{
+    s_en_baro = on ? 1 : 0;
+    if (!on)   /* frozen baro data must not keep the buzzer running */
+        audio_update(0.f, esp_timer_get_time() / 1e6, 1);
+}
+
+/* ---- I2C timing instrumentation (Firmware Reliability Rev 1 Task 2) ----
+ * device index: 0 = BMP581, 1 = QMI8658C, 2 = ST IMU.  Duration includes
+ * in-driver retries/recovery (the ST wrapper retries internally). */
+#define I2C_BMP 0
+#define I2C_QMI 1
+#define I2C_ST  2
+
+static void i2c_stat(int dev, int64_t t0_us, bool ok)
+{
+    uint32_t us = (uint32_t)(esp_timer_get_time() - t0_us);
+    g_app.i2c_n[dev]++;
+    if (!ok) g_app.i2c_fail[dev]++;
+    if (us > g_app.i2c_max_us[dev]) g_app.i2c_max_us[dev] = us;
+    int b = us < 250 ? 0 : us < 500 ? 1 : us < 1000 ? 2 : us < 2000 ? 3 :
+            us < 4000 ? 4 : us < 8000 ? 5 : us < 16000 ? 6 : 7;
+    g_app.i2c_hist[dev][b]++;
+}
+
 /* 10 s running average of the selected filter's vario */
 #define AVG_N (10 * BMP581_P_HZ)
 static float s_avg_ring[AVG_N];
@@ -174,7 +204,10 @@ void acq_select_filter(int f)
 static void acq_baro_read(void)
 {
     uint32_t tr, pr;
-    if (bmp581_read_raw(&s_bmp, &tr, &pr) != ESP_OK) {
+    int64_t t0 = esp_timer_get_time();
+    esp_err_t rerr = bmp581_read_raw(&s_bmp, &tr, &pr);
+    i2c_stat(I2C_BMP, t0, rerr == ESP_OK);
+    if (rerr != ESP_OK) {
         g_app.baro_dropped++;
         g_app.err_nak++;
         return;
@@ -219,8 +252,12 @@ static void acq_imu_read(void)
 {
     int16_t r[7];
     bool fresh;
-    if (s_have_qmi) {
-        if (qmi_imu_read(&s_qmi, r, &fresh) == ESP_OK) {
+    if (s_have_qmi && s_en_qmi) {
+        int64_t t0 = esp_timer_get_time();
+        esp_err_t rerr = qmi_imu_read(&s_qmi, r, &fresh);
+        i2c_stat(I2C_QMI, t0, rerr == ESP_OK);
+        if (rerr == ESP_OK) {
+            if (!fresh) g_app.imu_stale[0]++;
             memcpy(g_app.acc, r, sizeof(g_app.acc));
             memcpy(g_app.gyr, r + 3, sizeof(g_app.gyr));
             g_app.imu_t_us = esp_timer_get_time();
@@ -237,10 +274,14 @@ static void acq_imu_read(void)
             g_app.err_nak++;
         }
     }
-    if (s_have_st) {
+    if (s_have_st && s_en_st) {
         int16_t sr[8];
         bool sfresh;
-        if (lsm_imu_read(&s_st, sr, &sfresh) == ESP_OK) {
+        int64_t t0 = esp_timer_get_time();
+        esp_err_t rerr = lsm_imu_read(&s_st, sr, &sfresh);
+        i2c_stat(I2C_ST, t0, rerr == ESP_OK);
+        if (rerr == ESP_OK) {
+            if (!sfresh) g_app.imu_stale[1]++;
             acq_imu_evt_t evt;
             evt.seq = ++g_app.imu_seq;
             evt.t_us = (uint64_t)esp_timer_get_time();
@@ -258,11 +299,26 @@ static void acq_task(void *arg)
     TickType_t last = xTaskGetTickCount();
     int div = 0;
     uint32_t p_cnt = 0, i_cnt = 0, last_report = g_app.boot_ms;
+    int64_t last_baro_us = 0;
 
     for (;;) {
         vTaskDelayUntil(&last, period);
         acq_imu_read();
-        if (++div >= (1000 / TICK_MS) / BMP581_P_HZ) {
+        if (s_en_baro && ++div >= (1000 / TICK_MS) / BMP581_P_HZ) {
+            /* baro schedule jitter: how late/early is this read vs the
+             * previous one (25 ms grid)?  Includes IMU-read and any
+             * retry/recovery time in front of the baro. */
+            int64_t now_us = esp_timer_get_time();
+            if (last_baro_us != 0) {
+                int32_t d = (int32_t)(now_us - last_baro_us)
+                            - (int32_t)(1000000 / BMP581_P_HZ);
+                if (d < 0) d = -d;
+                g_app.baro_jit_n++;
+                g_app.baro_jit_sum_us += (uint32_t)d;
+                if ((uint32_t)d > g_app.baro_jit_max_us)
+                    g_app.baro_jit_max_us = (uint32_t)d;
+            }
+            last_baro_us = now_us;
             div = 0;
             acq_baro_read();
             p_cnt++;

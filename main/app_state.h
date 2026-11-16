@@ -37,6 +37,20 @@ typedef struct {
     uint32_t tx_q_high;           /* high-water mark of the IMU TX queue */
     float p_hz, i_hz;             /* measured sample rates */
 
+    /* ---- I2C timing bench (Firmware Reliability Rev 1, Task 2) ---- */
+    /* device index: 0 = BMP581, 1 = QMI8658C, 2 = ST IMU.  Durations
+     * include in-driver retries/recovery.  Buckets (us): <250 <500 <1k
+     * <2k <4k <8k <16k >=16k.  Writers: acq task; 1 Hz snapshot: tx task.
+     * Word-sized ops race benignly (a lost count shifts p99 by one). */
+    uint32_t i2c_n[3];
+    uint32_t i2c_fail[3];
+    uint32_t i2c_max_us[3];
+    uint32_t i2c_hist[3][8];
+    uint32_t imu_stale[2];        /* non-fresh reads: 0 = qmi, 1 = st */
+    uint32_t baro_jit_n;          /* baro interval samples (5 ms grid) */
+    uint32_t baro_jit_max_us;     /* worst |interval - 25 ms| */
+    uint32_t baro_jit_sum_us;
+
     /* ---- latest baro sample ---- */
     uint32_t p_raw;               /* BMP581 raw24 pressure */
     uint32_t t_raw;               /* BMP581 raw24 temperature */
