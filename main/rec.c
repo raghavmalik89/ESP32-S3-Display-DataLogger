@@ -1,4 +1,22 @@
-/* rec.c — see rec.h. */
+/* rec.c — recording session state machine.
+ *
+ * Firmware Reliability Rev 1: the GUI task no longer touches the SD
+ * session file.  It only posts a start/stop REQUEST (rec_toggle /
+ * rec_request); the TX task consumes it in rec_poll(), which is the
+ * single context that opens, writes markers into, and closes the
+ * session file — so the GUI can never close a file the TX task is
+ * writing.  Startup sequence puts the START marker first in the file;
+ * shutdown drains pending samples, writes the STOP marker last, then
+ * flushes and closes (with read-back verification in sd_sink).
+ *
+ * Truthfulness rules (frozen constraint):
+ *   - USB streaming alone is VOLATILE: the screen shows "USB STREAM", never
+ *     "SAVED".  Only when the host tool confirms capture ("G,1") does the
+ *     indicator add "+HOST".
+ *   - SD recording claims "REC SD" only because frames are counted at the
+ *     moment they are handed to the SD writer, and the red dot additionally
+ *     requires the session file to be open with zero accumulated sd_err.
+ */
 #include "rec.h"
 
 #include <stdio.h>
@@ -7,28 +25,59 @@
 #include "sd_sink.h"
 #include "tx.h"
 
+#include "esp_log.h"
 #include "esp_timer.h"
+
+static const char *TAG = "rec";
+
+/* 0 = none, 1 = start, 2 = stop; written by GUI/host command context,
+ * cleared and executed by the TX task in rec_poll() */
+static volatile int s_req;
+
+/* USB-only session numbering when no card is mounted (RAM-only, per boot) */
+static uint32_t s_usb_seq;
 
 void rec_toggle(void)
 {
-    if (!g_app.rec_active) {
-        g_app.rec_session++;
-        g_app.rec_start_ms = (uint32_t)(esp_timer_get_time() / 1000);
-        g_app.rec_frames = 0;
-        g_app.rec_active = 1;
-        /* SD backend only when the session file is actually open and
-         * accepting writes — a failed open falls back to the volatile
-         * USB stream and stays yellow (never claims persistent save) */
+    s_req = g_app.rec_active ? 2 : 1;
+}
+
+void rec_request(int start)
+{
+    s_req = start ? 1 : 2;
+}
+
+void rec_poll(void)   /* TX task context ONLY */
+{
+    int req = s_req;
+    if (!req) return;
+    s_req = 0;
+
+    if (req == 1 && !g_app.rec_active) {
+        uint32_t id = 0;
         g_app.rec_backend = 1;
         if (g_app.sd_present &&
-            sd_open_session(g_app.rec_session) == ESP_OK)
+            sd_open_session_auto(&id) == ESP_OK) {
             g_app.rec_backend = 2;
+        } else {
+            id = ++s_usb_seq;   /* no card / open failed: volatile stream */
+        }
+        g_app.rec_session = id;
+        g_app.rec_start_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        g_app.rec_frames = 0;
+        g_app.rec_active = 1;               /* marker below mirrors to SD */
         tx_event_session(1, g_app.rec_session);
-    } else {
+        ESP_LOGI(TAG, "session %lu start (%s)", (unsigned long)id,
+                 g_app.rec_backend == 2 ? "SD" : "USB-only");
+    } else if (req == 2 && g_app.rec_active) {
+        tx_drain();                          /* pending samples -> file */
+        tx_event_session(0, g_app.rec_session);  /* STOP marker, last line */
         g_app.rec_active = 0;
-        tx_event_session(0, g_app.rec_session);
         if (g_app.rec_backend == 2)
-            sd_close_session();
+            sd_close_session();              /* flush + close + verify */
+        ESP_LOGI(TAG, "session %lu stop (%lu frames)",
+                 (unsigned long)g_app.rec_session,
+                 (unsigned long)g_app.rec_frames);
     }
 }
 

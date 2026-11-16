@@ -34,6 +34,7 @@ typedef struct {
     uint32_t baro_dropped;        /* baro reads that failed or were stale */
     uint32_t imu_dropped;
     uint32_t err_overflow;        /* samples/lines dropped: USB/queue full */
+    uint32_t tx_q_high;           /* high-water mark of the IMU TX queue */
     float p_hz, i_hz;             /* measured sample rates */
 
     /* ---- latest baro sample ---- */

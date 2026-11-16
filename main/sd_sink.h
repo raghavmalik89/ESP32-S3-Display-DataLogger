@@ -33,8 +33,16 @@ esp_err_t sd_init(void);
 /* reopen the free-space cache (SLOW — call at mount and after close only) */
 esp_err_t sd_refresh_stats(void);
 
-/* open /sdcard/LOG%05u.CSV for a new session; every failure counted */
-esp_err_t sd_open_session(uint32_t session_id);
+/* open the next free /sdcard/LOG%05u.CSV for a new session.
+ *
+ * Uniqueness is guaranteed two ways: (1) the directory is scanned for
+ * the highest existing LOG number and the candidate is max+1, so the
+ * counter survives reboots, reflashing and power loss; (2) the file is
+ * created with O_CREAT|O_EXCL (FAT FA_CREATE_NEW), so even a scan race
+ * or a swapped card fails the open instead of truncating an existing
+ * file.  On success *session_id receives the file number.  Every
+ * failure is counted in g_app.sd_err. */
+esp_err_t sd_open_session_auto(uint32_t *session_id);
 
 /* session file state, for the red/green/yellow indicator */
 int sd_session_open(void);
@@ -49,7 +57,12 @@ uint64_t sd_free_now(void);
  * card stalls — acquisition must never block on storage */
 void sd_write(const char *line, size_t len);
 
-/* flush + close the current session file; failures counted */
+/* flush + close the current session file; failures counted.
+ *
+ * After a NORMAL close the file is read back once and verified: the
+ * first line must be the session START marker and the last line the
+ * STOP marker (Firmware Reliability Rev 1).  Verification failures are
+ * counted in g_app.sd_err and logged. */
 esp_err_t sd_close_session(void);
 
 #ifdef __cplusplus

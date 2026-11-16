@@ -14,7 +14,10 @@
 #include "app_state.h"
 #include "config.h"
 #include "filters.h"
+#include "rec.h"
 #include "sd_sink.h"
+
+#include <stdlib.h>
 
 #include "driver/usb_serial_jtag.h"
 #include "esp_err.h"
@@ -47,9 +50,39 @@ bool tx_push_baro(const acq_baro_evt_t *evt)
 bool tx_push_imu(const acq_imu_evt_t *evt)
 {
     if (!s_q_imu) return false;
-    if (xQueueSend(s_q_imu, evt, 0) == pdTRUE) return true;
+    if (xQueueSend(s_q_imu, evt, 0) == pdTRUE) {
+        UBaseType_t depth = uxQueueMessagesWaiting(s_q_imu);
+        if (depth > g_app.tx_q_high) g_app.tx_q_high = depth;
+        return true;
+    }
     g_app.err_overflow++;
     return false;
+}
+
+/* forward decl: shared line emitter below */
+static void emit(const char *line, int len);
+
+void tx_drain(void)
+{
+    char line[160];
+    acq_baro_evt_t b;
+    acq_imu_evt_t m;
+    while (s_q_baro && xQueueReceive(s_q_baro, &b, 0) == pdTRUE) {
+        int n = snprintf(line, sizeof(line), "B,%lu,%llu,%lu,%lu\n",
+                         (unsigned long)++s_seq_b,
+                         (unsigned long long)b.t_us,
+                         (unsigned long)b.p_raw, (unsigned long)b.t_raw);
+        emit(line, n);
+    }
+    while (s_q_imu && xQueueReceive(s_q_imu, &m, 0) == pdTRUE) {
+        int n = snprintf(line, sizeof(line),
+                         "M,%lu,%llu,%d,%d,%d,%d,%d,%d,%d\n",
+                         (unsigned long)++s_seq_m,
+                         (unsigned long long)m.t_us, m.sid,
+                         m.acc[0], m.acc[1], m.acc[2],
+                         m.gyr[0], m.gyr[1], m.gyr[2]);
+        emit(line, n);
+    }
 }
 
 /* measured protocol byte rate for the recording-time-left estimate */
@@ -127,20 +160,53 @@ void tx_event_filter(int filter)
           (unsigned long long)(esp_timer_get_time()), filter_id(filter));
 }
 
-/* host handshake: capture.py sends "G,1" (grabbing) / "G,0" (stopped) */
+/* host commands, one line per command, '\n' terminated:
+ *   G,0 / G,1   stop/start confirmed-capture flag (legacy handshake)
+ *   C,0 / C,1   stop/start a recording session (same lifecycle as the
+ *               BOOT hold — request is executed by the TX task)
+ * Acks are written to the USB port directly (never emit(): an ack must
+ * not land inside a recording file). */
 static void poll_host_cmd(void)
 {
-    char buf[16];
-    int n = usb_serial_jtag_read_bytes(buf, sizeof(buf) - 1, 0);
-    for (int i = 0; i < n; i++) {
-        if (buf[i] == '1') g_app.host_grab = 1;
-        else if (buf[i] == '0') g_app.host_grab = 0;
+    static char buf[24];
+    static int n;
+    char c;
+    while (usb_serial_jtag_read_bytes(&c, 1, 0) == 1) {
+        if (c == '\r') continue;
+        if (c != '\n') {
+            if (n < (int)sizeof(buf) - 1)
+                buf[n++] = c;
+            else
+                n = 0;              /* oversize garbage: resync */
+            continue;
+        }
+        buf[n] = 0;
+        int len = n;
+        n = 0;
+        if (len < 3 || buf[1] != ',') continue;
+        int v = atoi(buf + 2);
+        char ack[24];
+        int alen = 0;
+        switch (buf[0]) {
+        case 'G':
+            g_app.host_grab = v != 0;
+            alen = snprintf(ack, sizeof(ack), "#K,G,%d\n", v != 0);
+            break;
+        case 'C':
+            rec_request(v != 0);
+            alen = snprintf(ack, sizeof(ack), "#K,C,%d\n", v != 0);
+            break;
+        default:
+            alen = snprintf(ack, sizeof(ack), "#K,?\n");
+            break;
+        }
+        if (alen > 0)
+            usb_serial_jtag_write_bytes(ack, alen, 0);
     }
 }
 
 static void tx_task(void *arg)
 {
-    char line[160];
     s_last_conn = usb_serial_jtag_is_connected();
     if (s_last_conn)
         emit_meta("poweron");
@@ -148,25 +214,12 @@ static void tx_task(void *arg)
 
     TickType_t last_v = 0;
     for (;;) {
-        acq_baro_evt_t b;
-        acq_imu_evt_t m;
+        tx_drain();
 
-        while (s_q_baro && xQueueReceive(s_q_baro, &b, 0) == pdTRUE) {
-            int n = snprintf(line, sizeof(line), "B,%lu,%llu,%lu,%lu\n",
-                             (unsigned long)++s_seq_b,
-                             (unsigned long long)b.t_us,
-                             (unsigned long)b.p_raw, (unsigned long)b.t_raw);
-            emit(line, n);
-        }
-        while (s_q_imu && xQueueReceive(s_q_imu, &m, 0) == pdTRUE) {
-            int n = snprintf(line, sizeof(line),
-                             "M,%lu,%llu,%d,%d,%d,%d,%d,%d,%d\n",
-                             (unsigned long)++s_seq_m,
-                             (unsigned long long)m.t_us, m.sid,
-                             m.acc[0], m.acc[1], m.acc[2],
-                             m.gyr[0], m.gyr[1], m.gyr[2]);
-            emit(line, n);
-        }
+        /* serialized recording lifecycle (Firmware Reliability Rev 1):
+         * this task is the only context that opens/closes the session
+         * file, so file writes and the GUI can never race */
+        rec_poll();
 
         /* V frame at 20 Hz: selected filter estimate (mm/s, mm) */
         TickType_t now = xTaskGetTickCount();

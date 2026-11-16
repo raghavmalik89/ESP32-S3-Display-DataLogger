@@ -31,6 +31,11 @@ bool tx_push_imu(const acq_imu_evt_t *evt);
 void tx_event_session(int start, uint32_t session_id);
 void tx_event_filter(int filter);
 
+/* drain both sample queues through emit(); used by rec.c (TX task
+ * context) to flush pending samples into the file before the STOP
+ * marker, final flush and close */
+void tx_drain(void);
+
 #ifdef __cplusplus
 }
 #endif

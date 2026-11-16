@@ -17,8 +17,16 @@
 extern "C" {
 #endif
 
-/* toggle: start a new session or stop the active one */
+/* toggle: request a new session or stop the active one.  Safe from any
+ * task: only posts a request; the TX task executes it in rec_poll(). */
 void rec_toggle(void);
+
+/* explicit start/stop request (host command path); same semantics */
+void rec_request(int start);
+
+/* execute a pending start/stop request.  TX TASK CONTEXT ONLY — this is
+ * the single serialized owner of the SD session lifecycle and markers. */
+void rec_poll(void);
 
 /* short status string for the GUI, always truthful */
 const char *rec_status_text(void);
